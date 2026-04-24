@@ -1,8 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'firebase_options.dart';
 import 'screens/signup_screen.dart';
+import 'screens/home_screen.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
   runApp(const ProtegoApp());
 }
 
@@ -43,7 +51,48 @@ class ProtegoApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const SignUpScreen(),
+      home: const AuthGate(),
+    );
+  }
+}
+
+/// Listens to Firebase auth state and routes accordingly.
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        // Show loading while checking auth state
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return Scaffold(
+            backgroundColor: const Color(0xFF131313),
+            body: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Image.asset('assets/logo.png', height: 80),
+                  const SizedBox(height: 24),
+                  const CircularProgressIndicator(
+                    color: Color(0xFFFFB4AA),
+                    strokeWidth: 2.5,
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+
+        // User is signed in → Home
+        if (snapshot.hasData) {
+          return const HomeScreen();
+        }
+
+        // Not signed in → Sign Up
+        return const SignUpScreen();
+      },
     );
   }
 }

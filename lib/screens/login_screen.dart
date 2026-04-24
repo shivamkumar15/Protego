@@ -3,28 +3,26 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
-import 'login_screen.dart';
 import 'phone_auth_screen.dart';
 
-class SignUpScreen extends StatefulWidget {
-  const SignUpScreen({super.key});
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
 
   @override
-  State<SignUpScreen> createState() => _SignUpScreenState();
+  State<LoginScreen> createState() => _LoginScreenState();
 }
 
-class _SignUpScreenState extends State<SignUpScreen>
+class _LoginScreenState extends State<LoginScreen>
     with SingleTickerProviderStateMixin {
   final _formKey = GlobalKey<FormState>();
   final _authService = AuthService();
 
-  final _nameController = TextEditingController();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
 
   bool _obscurePassword = true;
   bool _isLoading = false;
-  String? _loadingProvider; // 'email', 'google', 'apple', 'phone'
+  String? _loadingProvider;
 
   late AnimationController _animController;
   late Animation<double> _fadeAnim;
@@ -42,7 +40,6 @@ class _SignUpScreenState extends State<SignUpScreen>
 
   @override
   void dispose() {
-    _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
     _animController.dispose();
@@ -77,14 +74,18 @@ class _SignUpScreenState extends State<SignUpScreen>
 
   String _mapFirebaseError(String code) {
     switch (code) {
-      case 'email-already-in-use':
-        return 'This email is already registered. Try logging in.';
+      case 'user-not-found':
+        return 'No account found with this email.';
+      case 'wrong-password':
+        return 'Incorrect password. Try again.';
       case 'invalid-email':
         return 'Please enter a valid email address.';
-      case 'weak-password':
-        return 'Password is too weak. Use at least 6 characters.';
-      case 'operation-not-allowed':
-        return 'This sign-in method is not enabled.';
+      case 'user-disabled':
+        return 'This account has been disabled.';
+      case 'too-many-requests':
+        return 'Too many attempts. Please wait and try again.';
+      case 'invalid-credential':
+        return 'Invalid email or password.';
       case 'cancelled':
         return 'Sign-in was cancelled.';
       default:
@@ -92,7 +93,7 @@ class _SignUpScreenState extends State<SignUpScreen>
     }
   }
 
-  Future<void> _signUpWithEmail() async {
+  Future<void> _signInWithEmail() async {
     if (!_formKey.currentState!.validate()) return;
 
     setState(() {
@@ -101,23 +102,30 @@ class _SignUpScreenState extends State<SignUpScreen>
     });
 
     try {
-      await _authService.signUpWithEmail(
+      await _authService.signInWithEmail(
         email: _emailController.text.trim(),
         password: _passwordController.text,
-        fullName: _nameController.text.trim(),
       );
-      _showSuccess('Account created successfully!');
+      _showSuccess('Welcome back!');
       if (mounted) {
         Navigator.popUntil(context, (route) => route.isFirst);
       }
     } on Exception catch (e) {
-      final code = e.toString().contains('email-already-in-use')
-          ? 'email-already-in-use'
-          : e.toString().contains('weak-password')
-              ? 'weak-password'
-              : e.toString().contains('invalid-email')
-                  ? 'invalid-email'
-                  : 'unknown';
+      final errorStr = e.toString();
+      String code = 'unknown';
+      for (final c in [
+        'user-not-found',
+        'wrong-password',
+        'invalid-email',
+        'user-disabled',
+        'too-many-requests',
+        'invalid-credential',
+      ]) {
+        if (errorStr.contains(c)) {
+          code = c;
+          break;
+        }
+      }
       _showError(_mapFirebaseError(code));
     } finally {
       if (mounted) {
@@ -179,6 +187,21 @@ class _SignUpScreenState extends State<SignUpScreen>
     }
   }
 
+  Future<void> _forgotPassword() async {
+    final email = _emailController.text.trim();
+    if (email.isEmpty) {
+      _showError('Enter your email first to reset password.');
+      return;
+    }
+
+    try {
+      await _authService.sendPasswordResetEmail(email);
+      _showSuccess('Password reset email sent to $email');
+    } on Exception catch (_) {
+      _showError('Could not send reset email. Check the address.');
+    }
+  }
+
   void _navigateToPhoneAuth() {
     Navigator.push(
       context,
@@ -189,7 +212,8 @@ class _SignUpScreenState extends State<SignUpScreen>
             position: Tween<Offset>(
               begin: const Offset(1.0, 0.0),
               end: Offset.zero,
-            ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOut)),
+            ).animate(
+                CurvedAnimation(parent: animation, curve: Curves.easeOut)),
             child: child,
           );
         },
@@ -198,17 +222,8 @@ class _SignUpScreenState extends State<SignUpScreen>
     );
   }
 
-  void _navigateToLogin() {
-    Navigator.push(
-      context,
-      PageRouteBuilder(
-        pageBuilder: (_, __, ___) => const LoginScreen(),
-        transitionsBuilder: (_, animation, __, child) {
-          return FadeTransition(opacity: animation, child: child);
-        },
-        transitionDuration: const Duration(milliseconds: 300),
-      ),
-    );
+  void _navigateToSignUp() {
+    Navigator.pop(context);
   }
 
   @override
@@ -222,11 +237,11 @@ class _SignUpScreenState extends State<SignUpScreen>
         children: [
           // Background Blobs
           Positioned(
-            top: size.height * 0.1,
-            left: -size.width * 0.05,
+            top: size.height * 0.15,
+            right: -size.width * 0.1,
             child: Container(
-              width: size.width * 0.4,
-              height: size.height * 0.4,
+              width: size.width * 0.45,
+              height: size.height * 0.45,
               decoration: BoxDecoration(
                 color: const Color(0xFF001f29).withOpacity(0.5),
                 shape: BoxShape.circle,
@@ -234,13 +249,13 @@ class _SignUpScreenState extends State<SignUpScreen>
             ),
           ),
           Positioned(
-            bottom: size.height * 0.05,
-            right: -size.width * 0.1,
+            bottom: size.height * 0.1,
+            left: -size.width * 0.15,
             child: Container(
               width: size.width * 0.5,
               height: size.height * 0.5,
               decoration: BoxDecoration(
-                color: theme.colorScheme.primary.withOpacity(0.15),
+                color: theme.colorScheme.primary.withOpacity(0.12),
                 shape: BoxShape.circle,
               ),
             ),
@@ -273,13 +288,13 @@ class _SignUpScreenState extends State<SignUpScreen>
                             height: 100, fit: BoxFit.contain),
                         const SizedBox(height: 24),
                         Text(
-                          'Begin Your Watch',
+                          'Welcome Back',
                           textAlign: TextAlign.center,
                           style: theme.textTheme.displayLarge,
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          'Join the elite network of personal protection.',
+                          'Your shield is always active.',
                           textAlign: TextAlign.center,
                           style: theme.textTheme.bodyLarge,
                         ),
@@ -302,22 +317,6 @@ class _SignUpScreenState extends State<SignUpScreen>
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              // Full Name
-                              _buildTextField(
-                                theme: theme,
-                                label: 'FULL NAME',
-                                hint: 'Enter your full name',
-                                icon: Icons.person_outline,
-                                controller: _nameController,
-                                validator: (v) {
-                                  if (v == null || v.trim().isEmpty) {
-                                    return 'Name is required';
-                                  }
-                                  return null;
-                                },
-                              ),
-                              const SizedBox(height: 20),
-
                               // Email
                               _buildTextField(
                                 theme: theme,
@@ -365,30 +364,45 @@ class _SignUpScreenState extends State<SignUpScreen>
                                   if (v == null || v.isEmpty) {
                                     return 'Password is required';
                                   }
-                                  if (v.length < 6) {
-                                    return 'At least 6 characters';
-                                  }
                                   return null;
                                 },
                               ),
-                              const SizedBox(height: 32),
 
-                              // Create Account Button
-                              _buildPrimaryButton(
-                                theme: theme,
-                                label: 'Create Account',
-                                isLoading: _loadingProvider == 'email',
-                                onPressed: _isLoading ? null : _signUpWithEmail,
+                              // Forgot Password
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: TextButton(
+                                  onPressed:
+                                      _isLoading ? null : _forgotPassword,
+                                  child: Text(
+                                    'Forgot Password?',
+                                    style:
+                                        theme.textTheme.bodySmall?.copyWith(
+                                      color: theme.colorScheme.primary
+                                          .withOpacity(0.8),
+                                    ),
+                                  ),
+                                ),
                               ),
                               const SizedBox(height: 16),
 
-                              // Phone Sign Up
+                              // Log In Button
+                              _buildPrimaryButton(
+                                theme: theme,
+                                label: 'Log In',
+                                isLoading: _loadingProvider == 'email',
+                                onPressed:
+                                    _isLoading ? null : _signInWithEmail,
+                              ),
+                              const SizedBox(height: 16),
+
+                              // Phone Login
                               OutlinedButton.icon(
                                 style: OutlinedButton.styleFrom(
                                   backgroundColor: const Color(0xFF131313),
                                   side: BorderSide(
-                                    color:
-                                        theme.colorScheme.primary.withOpacity(0.3),
+                                    color: theme.colorScheme.primary
+                                        .withOpacity(0.3),
                                   ),
                                   padding: const EdgeInsets.symmetric(
                                       vertical: 16),
@@ -397,15 +411,17 @@ class _SignUpScreenState extends State<SignUpScreen>
                                   ),
                                 ),
                                 icon: Icon(Icons.phone_android,
-                                    color: theme.colorScheme.primary, size: 20),
+                                    color: theme.colorScheme.primary,
+                                    size: 20),
                                 label: Text(
-                                  'Sign up with Phone',
+                                  'Log in with Phone',
                                   style: theme.textTheme.bodyMedium?.copyWith(
                                     fontWeight: FontWeight.w600,
                                     color: theme.colorScheme.primary,
                                   ),
                                 ),
-                                onPressed: _isLoading ? null : _navigateToPhoneAuth,
+                                onPressed:
+                                    _isLoading ? null : _navigateToPhoneAuth,
                               ),
                               const SizedBox(height: 24),
 
@@ -414,23 +430,26 @@ class _SignUpScreenState extends State<SignUpScreen>
                                 children: [
                                   Expanded(
                                     child: Divider(
-                                        color: Colors.white.withOpacity(0.1)),
+                                        color:
+                                            Colors.white.withOpacity(0.1)),
                                   ),
                                   Padding(
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 16),
                                     child: Text(
-                                      'OR SECURE WITH',
-                                      style:
-                                          theme.textTheme.labelLarge?.copyWith(
-                                        color: Colors.white.withOpacity(0.4),
+                                      'OR CONTINUE WITH',
+                                      style: theme.textTheme.labelLarge
+                                          ?.copyWith(
+                                        color:
+                                            Colors.white.withOpacity(0.4),
                                         fontSize: 10,
                                       ),
                                     ),
                                   ),
                                   Expanded(
                                     child: Divider(
-                                        color: Colors.white.withOpacity(0.1)),
+                                        color:
+                                            Colors.white.withOpacity(0.1)),
                                   ),
                                 ],
                               ),
@@ -439,7 +458,7 @@ class _SignUpScreenState extends State<SignUpScreen>
                               // Google Button
                               _buildSocialButton(
                                 theme: theme,
-                                label: 'Sign up with Google',
+                                label: 'Continue with Google',
                                 icon: _buildGoogleIcon(),
                                 isLoading: _loadingProvider == 'google',
                                 onPressed:
@@ -451,7 +470,7 @@ class _SignUpScreenState extends State<SignUpScreen>
                                 const SizedBox(height: 12),
                                 _buildSocialButton(
                                   theme: theme,
-                                  label: 'Sign up with Apple',
+                                  label: 'Continue with Apple',
                                   icon: const Icon(Icons.apple,
                                       color: Colors.white, size: 24),
                                   isLoading: _loadingProvider == 'apple',
@@ -469,16 +488,17 @@ class _SignUpScreenState extends State<SignUpScreen>
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Text(
-                              'Already have an account?',
+                              "Don't have an account?",
                               style: theme.textTheme.bodyMedium?.copyWith(
-                                color:
-                                    const Color(0xFFE7BDB7).withOpacity(0.7),
+                                color: const Color(0xFFE7BDB7)
+                                    .withOpacity(0.7),
                               ),
                             ),
                             TextButton(
-                              onPressed: _isLoading ? null : _navigateToLogin,
+                              onPressed:
+                                  _isLoading ? null : _navigateToSignUp,
                               child: Text(
-                                'Log In',
+                                'Sign Up',
                                 style: theme.textTheme.bodyMedium?.copyWith(
                                   color: theme.colorScheme.primary,
                                   fontWeight: FontWeight.bold,
