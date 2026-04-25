@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
+import 'package:latlong2/latlong.dart' as latlng;
 
 import '../services/auth_service.dart';
 import '../theme_mode_scope.dart';
@@ -648,26 +650,14 @@ class _LiveMapTab extends StatefulWidget {
 }
 
 class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
-  static const String _googleDarkMapStyle = '''
-  [
-    {"elementType":"geometry","stylers":[{"color":"#0f0f0f"}]},
-    {"elementType":"labels.text.fill","stylers":[{"color":"#9ca3af"}]},
-    {"elementType":"labels.text.stroke","stylers":[{"color":"#0b0b0b"}]},
-    {"featureType":"poi","elementType":"labels.icon","stylers":[{"visibility":"off"}]},
-    {"featureType":"road","elementType":"geometry","stylers":[{"color":"#1a1a1a"}]},
-    {"featureType":"road.arterial","elementType":"geometry","stylers":[{"color":"#222222"}]},
-    {"featureType":"road.highway","elementType":"geometry","stylers":[{"color":"#2c2c2c"}]},
-    {"featureType":"water","elementType":"geometry","stylers":[{"color":"#101826"}]}
-  ]
-  ''';
-
-  GoogleMapController? _mapController;
+  final MapController _mapController = MapController();
+  static const _walkingSpeedMetersPerSecond = 1.4;
   StreamSubscription<Position>? _positionSubscription;
   Position? _position;
-  LatLng? _nearestPoliceStation;
-  LatLng? _lastRouteFetchOrigin;
+  latlng.LatLng? _nearestPoliceStation;
+  latlng.LatLng? _lastRouteFetchOrigin;
   String _nearestPoliceStationName = 'Nearest police station';
-  List<LatLng> _routePoints = const [];
+  List<latlng.LatLng> _routePoints = const [];
   double? _routeDistanceKm;
   double? _routeEtaMinutes;
   bool _isLoading = true;
@@ -696,15 +686,12 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _moveCameraTo(LatLng target, {double? zoom}) async {
-    final controller = _mapController;
-    if (controller == null) return;
-    final update = zoom == null
-        ? CameraUpdate.newLatLng(target)
-        : CameraUpdate.newCameraPosition(
-            CameraPosition(target: target, zoom: zoom),
-          );
-    await controller.animateCamera(update);
+  void _moveCameraTo(latlng.LatLng target, {double? zoom}) {
+    try {
+      _mapController.move(target, zoom ?? _mapController.camera.zoom);
+    } catch (_) {
+      // Map may not be attached yet.
+    }
   }
 
   Future<void> _initLocationTracking() async {
@@ -761,7 +748,10 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
           _position = cached;
           _isLoading = false;
         });
-        _moveCameraTo(LatLng(cached.latitude, cached.longitude), zoom: 15.5);
+        _moveCameraTo(
+          latlng.LatLng(cached.latitude, cached.longitude),
+          zoom: 15.5,
+        );
         await _fetchNearestPoliceRoute(cached, forceRefresh: true);
       }
 
@@ -777,7 +767,10 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
         _position = current;
         _isLoading = false;
       });
-      _moveCameraTo(LatLng(current.latitude, current.longitude), zoom: 16);
+      _moveCameraTo(
+        latlng.LatLng(current.latitude, current.longitude),
+        zoom: 16,
+      );
       await _fetchNearestPoliceRoute(current, forceRefresh: true);
 
       await _positionSubscription?.cancel();
@@ -789,7 +782,7 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
       ).listen((position) {
         if (!mounted) return;
         setState(() => _position = position);
-        _moveCameraTo(LatLng(position.latitude, position.longitude));
+        _moveCameraTo(latlng.LatLng(position.latitude, position.longitude));
         _fetchNearestPoliceRoute(position);
       });
     } catch (_) {
@@ -826,14 +819,15 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
     }
 
     _isFetchingPoliceRoute = true;
-    _lastRouteFetchOrigin = LatLng(position.latitude, position.longitude);
+    _lastRouteFetchOrigin =
+        latlng.LatLng(position.latitude, position.longitude);
     try {
-      final station = await _findNearestPoliceStation(
+      final stations = await _findNearestPoliceStations(
         latitude: position.latitude,
         longitude: position.longitude,
       );
 
-      if (station == null) {
+      if (stations.isEmpty) {
         if (!mounted || _nearestPoliceStation != null) return;
         setState(() {
           _nearestPoliceStationName = 'No nearby police station found';
@@ -844,20 +838,64 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
         return;
       }
 
-      final route = await _buildRouteToPoliceStation(
-        from: LatLng(position.latitude, position.longitude),
-        to: station.position,
+      final origin = latlng.LatLng(position.latitude, position.longitude);
+      _PoliceStation? selectedStation;
+      _RouteInfo? selectedRoute;
+      final candidateStations = stations.take(4).toList();
+      var walkingGraph = await _buildWalkingGraph(
+        origin: origin,
+        destinations:
+            candidateStations.map((station) => station.position).toList(),
       );
 
+      Future<void> chooseBestRoute() async {
+        for (final station in candidateStations) {
+          final route = await _buildRouteToPoliceStation(
+            from: origin,
+            to: station.position,
+            graph: walkingGraph,
+          );
+          if (route == null && selectedStation == null) {
+            selectedStation = station;
+            continue;
+          }
+          if (route == null) {
+            continue;
+          }
+          final selectedRouteDuration =
+              selectedRoute?.durationSeconds ?? double.infinity;
+          if (selectedRoute == null ||
+              (route.durationSeconds ?? double.infinity) <
+                  selectedRouteDuration) {
+            selectedStation = station;
+            selectedRoute = route;
+          }
+        }
+      }
+
+      await chooseBestRoute();
+
+      if (selectedRoute == null && candidateStations.isNotEmpty) {
+        walkingGraph = await _buildWalkingGraph(
+          origin: origin,
+          destinations:
+              candidateStations.map((station) => station.position).toList(),
+          paddingDegrees: 0.02,
+        );
+        await chooseBestRoute();
+      }
+
+      final station = selectedStation ?? stations.first;
+
       if (!mounted) return;
-      final distanceMeters = route?.distanceMeters;
-      final durationSeconds = route?.durationSeconds;
+      final distanceMeters = selectedRoute?.distanceMeters;
+      final durationSeconds = selectedRoute?.durationSeconds;
       setState(() {
         _nearestPoliceStation = station.position;
         _nearestPoliceStationName = station.name;
-        _routePoints = route?.points ??
+        _routePoints = selectedRoute?.points ??
             [
-              LatLng(position.latitude, position.longitude),
+              origin,
               station.position,
             ];
         _routeDistanceKm =
@@ -875,7 +913,7 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
     }
   }
 
-  Future<_PoliceStation?> _findNearestPoliceStation({
+  Future<List<_PoliceStation>> _findNearestPoliceStations({
     required double latitude,
     required double longitude,
   }) async {
@@ -889,21 +927,20 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
     });
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      return null;
+      return const [];
     }
 
     final decoded = jsonDecode(response.body);
     if (decoded is! Map<String, dynamic>) {
-      return null;
+      return const [];
     }
 
     final elements = decoded['elements'];
     if (elements is! List || elements.isEmpty) {
-      return null;
+      return const [];
     }
 
-    Map<String, dynamic>? closest;
-    double? closestDistance;
+    final stations = <_PoliceStationDistance>[];
     for (final item in elements) {
       if (item is! Map<String, dynamic>) continue;
 
@@ -917,96 +954,380 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
               : null);
       if (lat == null || lon == null) continue;
 
-      final distance =
-          Geolocator.distanceBetween(latitude, longitude, lat, lon);
-      if (closestDistance == null || distance < closestDistance) {
-        closestDistance = distance;
-        closest = item;
-      }
+      final tags = item['tags'];
+      final name = tags is Map<String, dynamic>
+          ? (tags['name'] as String?) ?? 'Nearby police station'
+          : 'Nearby police station';
+      stations.add(
+        _PoliceStationDistance(
+          station: _PoliceStation(
+            name: name,
+            position: latlng.LatLng(lat, lon),
+          ),
+          straightLineDistance: Geolocator.distanceBetween(
+            latitude,
+            longitude,
+            lat,
+            lon,
+          ),
+        ),
+      );
     }
 
-    if (closest == null) {
-      return null;
-    }
-
-    final tags = closest['tags'];
-    final lat = (closest['lat'] as num?)?.toDouble() ??
-        (closest['center'] is Map<String, dynamic>
-            ? ((closest['center']['lat'] as num?)?.toDouble())
-            : null);
-    final lon = (closest['lon'] as num?)?.toDouble() ??
-        (closest['center'] is Map<String, dynamic>
-            ? ((closest['center']['lon'] as num?)?.toDouble())
-            : null);
-    if (lat == null || lon == null) {
-      return null;
-    }
-
-    final name = tags is Map<String, dynamic>
-        ? (tags['name'] as String?) ?? 'Nearest police station'
-        : 'Nearest police station';
-
-    return _PoliceStation(
-      name: name,
-      position: LatLng(lat, lon),
+    stations.sort(
+      (a, b) => a.straightLineDistance.compareTo(b.straightLineDistance),
     );
+    return stations.map((entry) => entry.station).take(6).toList();
   }
 
   Future<_RouteInfo?> _buildRouteToPoliceStation({
-    required LatLng from,
-    required LatLng to,
+    required latlng.LatLng from,
+    required latlng.LatLng to,
+    required _WalkingGraph graph,
   }) async {
-    final coordinates =
-        '${from.longitude},${from.latitude};${to.longitude},${to.latitude}';
+    if (graph.nodes.length < 2) {
+      return null;
+    }
+
+    final startCandidates = _findNearestGraphNodeCandidates(graph, from);
+    final endCandidates = _findNearestGraphNodeCandidates(graph, to);
+    if (startCandidates.isEmpty || endCandidates.isEmpty) {
+      return null;
+    }
+
+    _ShortestPathResult? bestPath;
+    _GraphNodeDistance? bestStart;
+    _GraphNodeDistance? bestEnd;
+    double? bestTotalDistance;
+
+    for (final start in startCandidates.take(5)) {
+      for (final end in endCandidates.take(5)) {
+        final aStarPath = _runAStar(graph, start.nodeId, end.nodeId);
+        final dijkstraPath = _runDijkstra(graph, start.nodeId, end.nodeId);
+        final chosenPath = _chooseBestPath(aStarPath, dijkstraPath);
+        if (chosenPath == null || chosenPath.nodeIds.isEmpty) {
+          continue;
+        }
+
+        final totalDistance = chosenPath.distanceMeters +
+            start.distanceMeters +
+            end.distanceMeters;
+        if (bestTotalDistance == null || totalDistance < bestTotalDistance) {
+          bestTotalDistance = totalDistance;
+          bestPath = chosenPath;
+          bestStart = start;
+          bestEnd = end;
+        }
+      }
+    }
+
+    if (bestPath == null || bestStart == null || bestEnd == null) {
+      return null;
+    }
+
+    final points = <latlng.LatLng>[from];
+    for (final nodeId in bestPath.nodeIds) {
+      final point = graph.nodes[nodeId];
+      if (point != null) {
+        points.add(point);
+      }
+    }
+    if (points.last.latitude != to.latitude ||
+        points.last.longitude != to.longitude) {
+      points.add(to);
+    }
+
+    final distanceMeters = bestPath.distanceMeters +
+        bestStart.distanceMeters +
+        bestEnd.distanceMeters;
+    final durationSeconds = distanceMeters / _walkingSpeedMetersPerSecond;
+
+    return _RouteInfo(
+      points: points,
+      distanceMeters: distanceMeters,
+      durationSeconds: durationSeconds,
+    );
+  }
+
+  Future<_WalkingGraph> _buildWalkingGraph({
+    required latlng.LatLng origin,
+    required List<latlng.LatLng> destinations,
+    double paddingDegrees = 0.01,
+  }) async {
+    final points = [origin, ...destinations];
+    final latitudes = points.map((point) => point.latitude);
+    final longitudes = points.map((point) => point.longitude);
+    final centerLatitude =
+        points.map((point) => point.latitude).reduce((a, b) => a + b) /
+            points.length;
+    final latitudePadding = paddingDegrees;
+    final longitudePadding = paddingDegrees /
+        (math.cos(centerLatitude * math.pi / 180).abs().clamp(0.3, 1.0));
+
+    final south = latitudes.reduce((a, b) => a < b ? a : b) - latitudePadding;
+    final north = latitudes.reduce((a, b) => a > b ? a : b) + latitudePadding;
+    final west = longitudes.reduce((a, b) => a < b ? a : b) - longitudePadding;
+    final east = longitudes.reduce((a, b) => a > b ? a : b) + longitudePadding;
+
+    final query = '''
+[out:json][timeout:25];
+(
+  way["highway"]($south,$west,$north,$east);
+);
+(._;>;);
+out body;
+''';
     final uri =
-        Uri.https('router.project-osrm.org', '/route/v1/driving/$coordinates', {
-      'overview': 'full',
-      'geometries': 'geojson',
-    });
+        Uri.https('overpass-api.de', '/api/interpreter', {'data': query});
     final response = await http.get(uri, headers: {
       'User-Agent': 'Protego/1.0 (safety app)',
       'Accept': 'application/json',
     });
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      return null;
+      return const _WalkingGraph(nodes: {}, adjacency: {});
     }
 
     final decoded = jsonDecode(response.body);
     if (decoded is! Map<String, dynamic>) {
-      return null;
+      return const _WalkingGraph(nodes: {}, adjacency: {});
     }
 
-    final routes = decoded['routes'];
-    if (routes is! List ||
-        routes.isEmpty ||
-        routes.first is! Map<String, dynamic>) {
-      return null;
+    final elements = decoded['elements'];
+    if (elements is! List) {
+      return const _WalkingGraph(nodes: {}, adjacency: {});
     }
 
-    final firstRoute = routes.first as Map<String, dynamic>;
-    final distanceMeters = (firstRoute['distance'] as num?)?.toDouble();
-    final durationSeconds = (firstRoute['duration'] as num?)?.toDouble();
-
-    final geometry = firstRoute['geometry'];
-    final coordinatesList =
-        geometry is Map<String, dynamic> ? geometry['coordinates'] : null;
-
-    final points = <LatLng>[];
-    if (coordinatesList is List) {
-      for (final coordinate in coordinatesList) {
-        if (coordinate is! List || coordinate.length < 2) continue;
-        final lon = (coordinate[0] as num?)?.toDouble();
-        final lat = (coordinate[1] as num?)?.toDouble();
-        if (lat == null || lon == null) continue;
-        points.add(LatLng(lat, lon));
+    final nodes = <int, latlng.LatLng>{};
+    final ways = <Map<String, dynamic>>[];
+    for (final element in elements) {
+      if (element is! Map<String, dynamic>) continue;
+      if (element['type'] == 'node') {
+        final id = element['id'] as num?;
+        final lat = element['lat'] as num?;
+        final lon = element['lon'] as num?;
+        if (id == null || lat == null || lon == null) continue;
+        nodes[id.toInt()] = latlng.LatLng(lat.toDouble(), lon.toDouble());
+      } else if (element['type'] == 'way') {
+        ways.add(element);
       }
     }
 
-    return _RouteInfo(
-      points: points,
+    final adjacency = <int, List<_GraphEdge>>{};
+    for (final way in ways) {
+      final tags = way['tags'];
+      if (!_isWalkableWay(tags is Map<String, dynamic> ? tags : const {})) {
+        continue;
+      }
+      final nodeRefs = way['nodes'];
+      if (nodeRefs is! List || nodeRefs.length < 2) continue;
+
+      final walkForward =
+          !_isOneWayFootBlocked(tags is Map<String, dynamic> ? tags : const {});
+      for (var i = 0; i < nodeRefs.length - 1; i++) {
+        final fromId = (nodeRefs[i] as num?)?.toInt();
+        final toId = (nodeRefs[i + 1] as num?)?.toInt();
+        if (fromId == null || toId == null) continue;
+        final fromPoint = nodes[fromId];
+        final toPoint = nodes[toId];
+        if (fromPoint == null || toPoint == null) continue;
+
+        final distance = Geolocator.distanceBetween(
+          fromPoint.latitude,
+          fromPoint.longitude,
+          toPoint.latitude,
+          toPoint.longitude,
+        );
+        adjacency.putIfAbsent(fromId, () => []).add(
+              _GraphEdge(toNodeId: toId, distanceMeters: distance),
+            );
+        if (walkForward) {
+          adjacency.putIfAbsent(toId, () => []).add(
+                _GraphEdge(toNodeId: fromId, distanceMeters: distance),
+              );
+        }
+      }
+    }
+
+    return _WalkingGraph(nodes: nodes, adjacency: adjacency);
+  }
+
+  bool _isWalkableWay(Map<String, dynamic> tags) {
+    const blockedHighways = {
+      'motorway',
+      'motorway_link',
+      'trunk',
+      'trunk_link',
+      'construction',
+      'raceway',
+    };
+    final highway = tags['highway'] as String?;
+    if (highway == null || blockedHighways.contains(highway)) {
+      return false;
+    }
+
+    final access = tags['access'] as String?;
+    final foot = tags['foot'] as String?;
+    if (access == 'private' || access == 'no' || foot == 'no') {
+      return false;
+    }
+
+    return true;
+  }
+
+  bool _isOneWayFootBlocked(Map<String, dynamic> tags) {
+    final oneWayFoot = tags['oneway:foot'] as String?;
+    if (oneWayFoot == 'yes') {
+      return false;
+    }
+    return (tags['oneway'] as String?) != 'yes';
+  }
+
+  List<_GraphNodeDistance> _findNearestGraphNodeCandidates(
+    _WalkingGraph graph,
+    latlng.LatLng point,
+  ) {
+    final candidates = <_GraphNodeDistance>[];
+
+    graph.nodes.forEach((nodeId, nodePoint) {
+      if (!(graph.adjacency[nodeId]?.isNotEmpty ?? false)) {
+        return;
+      }
+      final distance = Geolocator.distanceBetween(
+        point.latitude,
+        point.longitude,
+        nodePoint.latitude,
+        nodePoint.longitude,
+      );
+      candidates.add(
+        _GraphNodeDistance(nodeId: nodeId, distanceMeters: distance),
+      );
+    });
+
+    candidates.sort((a, b) => a.distanceMeters.compareTo(b.distanceMeters));
+    return candidates.take(12).toList();
+  }
+
+  _ShortestPathResult? _chooseBestPath(
+    _ShortestPathResult? aStarPath,
+    _ShortestPathResult? dijkstraPath,
+  ) {
+    if (aStarPath == null) return dijkstraPath;
+    if (dijkstraPath == null) return aStarPath;
+    return aStarPath.distanceMeters <= dijkstraPath.distanceMeters
+        ? aStarPath
+        : dijkstraPath;
+  }
+
+  _ShortestPathResult? _runAStar(
+    _WalkingGraph graph,
+    int startNodeId,
+    int endNodeId,
+  ) {
+    final openSet =
+        _MinHeap<_FrontierNode>((a, b) => a.priority.compareTo(b.priority))
+          ..add(_FrontierNode(nodeId: startNodeId, priority: 0));
+    final cameFrom = <int, int>{};
+    final gScore = <int, double>{startNodeId: 0};
+    final fScore = <int, double>{
+      startNodeId: _heuristicDistance(graph, startNodeId, endNodeId),
+    };
+    final closedSet = <int>{};
+
+    while (openSet.isNotEmpty) {
+      final current = openSet.removeFirst().nodeId;
+      if (!closedSet.add(current)) {
+        continue;
+      }
+      if (current == endNodeId) {
+        return _reconstructPath(cameFrom, current, gScore[current] ?? 0);
+      }
+
+      for (final edge in graph.adjacency[current] ?? const <_GraphEdge>[]) {
+        final tentative =
+            (gScore[current] ?? double.infinity) + edge.distanceMeters;
+        if (tentative >= (gScore[edge.toNodeId] ?? double.infinity)) {
+          continue;
+        }
+        cameFrom[edge.toNodeId] = current;
+        gScore[edge.toNodeId] = tentative;
+        final estimatedTotal =
+            tentative + _heuristicDistance(graph, edge.toNodeId, endNodeId);
+        fScore[edge.toNodeId] = estimatedTotal;
+        if (!closedSet.contains(edge.toNodeId)) {
+          openSet.add(
+            _FrontierNode(nodeId: edge.toNodeId, priority: estimatedTotal),
+          );
+        }
+      }
+    }
+
+    return null;
+  }
+
+  _ShortestPathResult? _runDijkstra(
+    _WalkingGraph graph,
+    int startNodeId,
+    int endNodeId,
+  ) {
+    final queue =
+        _MinHeap<_FrontierNode>((a, b) => a.priority.compareTo(b.priority))
+          ..add(_FrontierNode(nodeId: startNodeId, priority: 0));
+    final distances = <int, double>{startNodeId: 0};
+    final cameFrom = <int, int>{};
+    final visited = <int>{};
+
+    while (queue.isNotEmpty) {
+      final current = queue.removeFirst().nodeId;
+      if (!visited.add(current)) {
+        continue;
+      }
+      if (current == endNodeId) {
+        return _reconstructPath(cameFrom, current, distances[current] ?? 0);
+      }
+
+      for (final edge in graph.adjacency[current] ?? const <_GraphEdge>[]) {
+        final tentative =
+            (distances[current] ?? double.infinity) + edge.distanceMeters;
+        if (tentative >= (distances[edge.toNodeId] ?? double.infinity)) {
+          continue;
+        }
+        distances[edge.toNodeId] = tentative;
+        cameFrom[edge.toNodeId] = current;
+        queue.add(_FrontierNode(nodeId: edge.toNodeId, priority: tentative));
+      }
+    }
+
+    return null;
+  }
+
+  double _heuristicDistance(_WalkingGraph graph, int fromNodeId, int toNodeId) {
+    final from = graph.nodes[fromNodeId];
+    final to = graph.nodes[toNodeId];
+    if (from == null || to == null) {
+      return 0;
+    }
+    return Geolocator.distanceBetween(
+      from.latitude,
+      from.longitude,
+      to.latitude,
+      to.longitude,
+    );
+  }
+
+  _ShortestPathResult _reconstructPath(
+    Map<int, int> cameFrom,
+    int current,
+    double distanceMeters,
+  ) {
+    final path = <int>[current];
+    while (cameFrom.containsKey(current)) {
+      current = cameFrom[current]!;
+      path.add(current);
+    }
+    return _ShortestPathResult(
+      nodeIds: path.reversed.toList(),
       distanceMeters: distanceMeters,
-      durationSeconds: durationSeconds,
     );
   }
 
@@ -1118,68 +1439,76 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
       );
     }
 
-    final current = LatLng(_position!.latitude, _position!.longitude);
+    final current = latlng.LatLng(_position!.latitude, _position!.longitude);
     final destination = _nearestPoliceStation;
     final routePoints = _routePoints.length >= 2
         ? _routePoints
-        : (destination != null ? [current, destination] : const <LatLng>[]);
+        : (destination != null
+            ? [current, destination]
+            : const <latlng.LatLng>[]);
 
-    final markers = <Marker>{
-      Marker(
-        markerId: const MarkerId('current_location'),
-        position: current,
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
-        infoWindow: const InfoWindow(title: 'Your Location'),
+    return FlutterMap(
+      mapController: _mapController,
+      options: MapOptions(
+        initialCenter: current,
+        initialZoom: 16,
+        maxZoom: 19,
+        minZoom: 3,
       ),
-      if (destination != null)
-        Marker(
-          markerId: const MarkerId('nearest_police_station'),
-          position: destination,
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
-          infoWindow: InfoWindow(title: _nearestPoliceStationName),
+      children: [
+        TileLayer(
+          urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+          userAgentPackageName: 'com.example.protego',
+          retinaMode: RetinaMode.isHighDensity(context),
+          maxNativeZoom: 19,
         ),
-    };
-
-    final circles = <Circle>{
-      Circle(
-        circleId: const CircleId('accuracy'),
-        center: current,
-        radius: _position!.accuracy.clamp(20, 120).toDouble(),
-        fillColor: theme.colorScheme.primary.withValues(alpha: 0.16),
-        strokeColor: theme.colorScheme.primary.withValues(alpha: 0.55),
-        strokeWidth: 1,
-      ),
-    };
-
-    final polylines = <Polyline>{
-      if (routePoints.length >= 2)
-        Polyline(
-          polylineId: const PolylineId('route_to_police'),
-          points: routePoints,
-          color: theme.colorScheme.primary.withValues(alpha: 0.9),
-          width: 6,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
+        if (routePoints.length >= 2)
+          PolylineLayer(
+            polylines: [
+              Polyline(
+                points: routePoints,
+                color: theme.colorScheme.primary.withValues(alpha: 0.9),
+                strokeWidth: 6,
+              ),
+            ],
+          ),
+        CircleLayer(
+          circles: [
+            CircleMarker(
+              point: current,
+              radius: _position!.accuracy.clamp(20, 120).toDouble() / 2,
+              color: theme.colorScheme.primary.withValues(alpha: 0.16),
+              borderColor: theme.colorScheme.primary.withValues(alpha: 0.55),
+              borderStrokeWidth: 1,
+            ),
+          ],
         ),
-    };
-
-    return GoogleMap(
-      initialCameraPosition: CameraPosition(target: current, zoom: 16),
-      style: isDark ? _googleDarkMapStyle : null,
-      myLocationEnabled: false,
-      myLocationButtonEnabled: false,
-      compassEnabled: true,
-      mapToolbarEnabled: false,
-      zoomControlsEnabled: false,
-      mapType: MapType.normal,
-      markers: markers,
-      circles: circles,
-      polylines: polylines,
-      onMapCreated: (controller) {
-        _mapController = controller;
-        _moveCameraTo(current, zoom: 16);
-      },
+        MarkerLayer(
+          markers: [
+            Marker(
+              point: current,
+              width: 28,
+              height: 28,
+              child: Icon(
+                Icons.my_location,
+                color: theme.colorScheme.primary,
+                size: 24,
+              ),
+            ),
+            if (destination != null)
+              Marker(
+                point: destination,
+                width: 36,
+                height: 36,
+                child: const Icon(
+                  Icons.local_police,
+                  color: Color(0xFFFF4D4F),
+                  size: 30,
+                ),
+              ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -1214,7 +1543,7 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
                           color: Color(0xFFFFD54F), size: 16),
                       SizedBox(width: 6),
                       Text(
-                        'Police Route',
+                        'Police Walk Route',
                         style: TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.w700,
@@ -1283,7 +1612,7 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
                         Text(
                           _nearestPoliceStation == null
                               ? 'Finding nearest police station...'
-                              : 'Direction ready from your live location',
+                              : 'Shortest walking path using A* + Dijkstra',
                           style: const TextStyle(
                             color: Color(0xFFD1D5DB),
                             fontWeight: FontWeight.w500,
@@ -1309,7 +1638,7 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
                       Border.all(color: Colors.white.withValues(alpha: 0.14)),
                 ),
                 child: Text(
-                  'Distance: $distanceText   ETA: $etaText',
+                  'Walk: $distanceText   ETA: $etaText',
                   style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.w700,
@@ -1329,7 +1658,27 @@ class _PoliceStation {
   const _PoliceStation({required this.name, required this.position});
 
   final String name;
-  final LatLng position;
+  final latlng.LatLng position;
+}
+
+class _PoliceStationDistance {
+  const _PoliceStationDistance({
+    required this.station,
+    required this.straightLineDistance,
+  });
+
+  final _PoliceStation station;
+  final double straightLineDistance;
+}
+
+class _GraphNodeDistance {
+  const _GraphNodeDistance({
+    required this.nodeId,
+    required this.distanceMeters,
+  });
+
+  final int nodeId;
+  final double distanceMeters;
 }
 
 class _RouteInfo {
@@ -1339,9 +1688,106 @@ class _RouteInfo {
     required this.durationSeconds,
   });
 
-  final List<LatLng> points;
+  final List<latlng.LatLng> points;
   final double? distanceMeters;
   final double? durationSeconds;
+}
+
+class _WalkingGraph {
+  const _WalkingGraph({required this.nodes, required this.adjacency});
+
+  final Map<int, latlng.LatLng> nodes;
+  final Map<int, List<_GraphEdge>> adjacency;
+}
+
+class _FrontierNode {
+  const _FrontierNode({required this.nodeId, required this.priority});
+
+  final int nodeId;
+  final double priority;
+}
+
+class _MinHeap<T> {
+  _MinHeap(this._compare);
+
+  final int Function(T a, T b) _compare;
+  final List<T> _items = <T>[];
+
+  bool get isNotEmpty => _items.isNotEmpty;
+
+  void add(T value) {
+    _items.add(value);
+    _siftUp(_items.length - 1);
+  }
+
+  T removeFirst() {
+    final first = _items.first;
+    final last = _items.removeLast();
+    if (_items.isNotEmpty) {
+      _items[0] = last;
+      _siftDown(0);
+    }
+    return first;
+  }
+
+  void _siftUp(int index) {
+    var child = index;
+    while (child > 0) {
+      final parent = (child - 1) ~/ 2;
+      if (_compare(_items[child], _items[parent]) >= 0) {
+        break;
+      }
+      _swap(child, parent);
+      child = parent;
+    }
+  }
+
+  void _siftDown(int index) {
+    var parent = index;
+    while (true) {
+      final left = (parent * 2) + 1;
+      final right = left + 1;
+      var candidate = parent;
+
+      if (left < _items.length &&
+          _compare(_items[left], _items[candidate]) < 0) {
+        candidate = left;
+      }
+      if (right < _items.length &&
+          _compare(_items[right], _items[candidate]) < 0) {
+        candidate = right;
+      }
+      if (candidate == parent) {
+        break;
+      }
+
+      _swap(parent, candidate);
+      parent = candidate;
+    }
+  }
+
+  void _swap(int left, int right) {
+    final temp = _items[left];
+    _items[left] = _items[right];
+    _items[right] = temp;
+  }
+}
+
+class _GraphEdge {
+  const _GraphEdge({required this.toNodeId, required this.distanceMeters});
+
+  final int toNodeId;
+  final double distanceMeters;
+}
+
+class _ShortestPathResult {
+  const _ShortestPathResult({
+    required this.nodeIds,
+    required this.distanceMeters,
+  });
+
+  final List<int> nodeIds;
+  final double distanceMeters;
 }
 
 class _EmergencyContactsTab extends StatelessWidget {

@@ -25,16 +25,27 @@ dependencies:
   shared_preferences: ^2.3.2
   country_picker: ^2.0.27
   geolocator: ^14.0.2
-  google_maps_flutter: ^2.12.3
+  flutter_map: ^8.2.2
+  latlong2: ^0.9.1
   http: ^1.6.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: assets/MainIcon.png
+  adaptive_icon_background: "#000000"
+  adaptive_icon_foreground: assets/MainIcon.png
+  adaptive_icon_foreground_inset: 4
 
 flutter:
   uses-material-design: true
   assets:
     - assets/LightThemeLogo.png
     - assets/DarkThemeLogo.png
+    - assets/MainIcon.png
