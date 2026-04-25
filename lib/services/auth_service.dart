@@ -6,11 +6,41 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
 class AuthService {
+  AuthService._();
+  static final AuthService _instance = AuthService._();
+  factory AuthService() => _instance;
+
   final FirebaseAuth _auth = FirebaseAuth.instance;
+  static const Duration _verificationEmailCooldown = Duration(seconds: 60);
+  DateTime? _lastVerificationEmailSentAt;
 
   // ── Current user ──────────────────────────────────────────────
   User? get currentUser => _auth.currentUser;
   Stream<User?> get authStateChanges => _auth.authStateChanges();
+
+  int get verificationEmailCooldownRemainingSeconds {
+    final lastSentAt = _lastVerificationEmailSentAt;
+    if (lastSentAt == null) return 0;
+
+    final elapsed = DateTime.now().difference(lastSentAt);
+    final remaining = _verificationEmailCooldown - elapsed;
+    return remaining.isNegative ? 0 : remaining.inSeconds + 1;
+  }
+
+  Future<void> sendVerificationEmailWithRateLimit(User? user) async {
+    if (user == null) return;
+
+    final remaining = verificationEmailCooldownRemainingSeconds;
+    if (remaining > 0) {
+      throw FirebaseAuthException(
+        code: 'verification-email-rate-limited',
+        message: 'Please wait $remaining seconds before requesting again.',
+      );
+    }
+
+    await user.sendEmailVerification();
+    _lastVerificationEmailSentAt = DateTime.now();
+  }
 
   // ── Email & Password ─────────────────────────────────────────
   Future<UserCredential> signUpWithEmail({
@@ -22,9 +52,14 @@ class AuthService {
       email: email,
       password: password,
     );
-    // Update display name
+
     await credential.user?.updateDisplayName(fullName);
-    await credential.user?.reload();
+
+    try {
+      await sendVerificationEmailWithRateLimit(credential.user);
+    } on FirebaseAuthException {
+      rethrow;
+    }
     return credential;
   }
 
@@ -32,10 +67,26 @@ class AuthService {
     required String email,
     required String password,
   }) async {
-    return await _auth.signInWithEmailAndPassword(
+    final credential = await _auth.signInWithEmailAndPassword(
       email: email,
       password: password,
     );
+
+    await credential.user?.reload();
+    final isVerified = credential.user?.emailVerified ?? false;
+    if (!isVerified) {
+      try {
+        await sendVerificationEmailWithRateLimit(credential.user);
+      } catch (_) {
+        // Keep flow secure even if resend fails; user stays blocked.
+      }
+      throw FirebaseAuthException(
+        code: 'email-not-verified',
+        message: 'Please verify your email before signing in.',
+      );
+    }
+
+    return credential;
   }
 
   // ── Phone (OTP) ──────────────────────────────────────────────

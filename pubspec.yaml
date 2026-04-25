@@ -22,6 +22,8 @@ dependencies:
 
   # Utilities
   crypto: ^3.0.6
+  shared_preferences: ^2.3.2
+  country_picker: ^2.0.27
 
 dev_dependencies:
   flutter_test:
@@ -31,4 +33,5 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/logo.png
+    - assets/LightThemeLogo.png
+    - assets/DarkThemeLogo.png

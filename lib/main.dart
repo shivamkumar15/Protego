@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'firebase_options.dart';
+import 'theme_mode_scope.dart';
 import 'screens/signup_screen.dart';
 import 'screens/home_screen.dart';
+import 'screens/verify_email_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -14,83 +16,182 @@ void main() async {
   runApp(const ProtegoApp());
 }
 
-class ProtegoApp extends StatelessWidget {
+class ProtegoApp extends StatefulWidget {
   const ProtegoApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Guardian Safety App',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF131313),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFFFFB4AA),
-          surface: Color(0xFF131313),
-          onSurface: Color(0xFFE2E2E2),
+  State<ProtegoApp> createState() => _ProtegoAppState();
+}
+
+class _ProtegoAppState extends State<ProtegoApp> {
+  static const _themeModePrefsKey = 'theme_mode';
+  final ValueNotifier<ThemeMode> _themeMode =
+      ValueNotifier<ThemeMode>(ThemeMode.system);
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedThemeMode();
+    _themeMode.addListener(_persistThemeMode);
+  }
+
+  @override
+  void dispose() {
+    _themeMode.removeListener(_persistThemeMode);
+    _themeMode.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadSavedThemeMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedValue = prefs.getString(_themeModePrefsKey);
+    if (savedValue == null) return;
+
+    final savedMode = _themeModeFromString(savedValue);
+    if (savedMode != null) {
+      _themeMode.value = savedMode;
+    }
+  }
+
+  Future<void> _persistThemeMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_themeModePrefsKey, _themeMode.value.name);
+  }
+
+  ThemeMode? _themeModeFromString(String value) {
+    switch (value) {
+      case 'system':
+        return ThemeMode.system;
+      case 'light':
+        return ThemeMode.light;
+      case 'dark':
+        return ThemeMode.dark;
+      default:
+        return null;
+    }
+  }
+
+  ThemeData _buildLightTheme() {
+    const primary = Color(0xFFF71180);
+    return ThemeData(
+      useMaterial3: true,
+      brightness: Brightness.light,
+      scaffoldBackgroundColor: const Color(0xFFF8FAFC),
+      colorScheme: const ColorScheme.light(
+        primary: primary,
+        secondary: primary,
+        surface: Colors.white,
+        onSurface: Color(0xFF0F172A),
+      ),
+      appBarTheme: const AppBarTheme(
+        backgroundColor: Colors.transparent,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: Colors.white,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFFCBD5E1)),
         ),
-        textTheme: TextTheme(
-          displayLarge: GoogleFonts.manrope(
-            fontSize: 36,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -1,
-            color: const Color(0xFFE2E2E2),
-          ),
-          bodyLarge: GoogleFonts.inter(
-            fontSize: 16,
-            fontWeight: FontWeight.w400,
-            color: const Color(0xFFE7BDB7),
-          ),
-          labelLarge: GoogleFonts.inter(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 2,
-            color: const Color(0xFFFFB4AA),
-          ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFFCBD5E1)),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: primary, width: 1.4),
         ),
       ),
-      home: const AuthGate(),
+      fontFamily: 'Inter',
+    );
+  }
+
+  ThemeData _buildDarkTheme() {
+    const primary = Color(0xFFF71180);
+    return ThemeData(
+      useMaterial3: true,
+      brightness: Brightness.dark,
+      scaffoldBackgroundColor: Colors.black,
+      colorScheme: const ColorScheme.dark(
+        primary: primary,
+        secondary: primary,
+        surface: Color(0xFF0A0A0A),
+        onSurface: Color(0xFFF5F5F5),
+      ),
+      appBarTheme: const AppBarTheme(
+        backgroundColor: Colors.transparent,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: const Color(0xFF101010),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFF2A2A2A)),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFF2A2A2A)),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: primary, width: 1.4),
+        ),
+      ),
+      fontFamily: 'Inter',
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ThemeModeScope(
+      notifier: _themeMode,
+      child: ValueListenableBuilder<ThemeMode>(
+        valueListenable: _themeMode,
+        builder: (context, mode, _) {
+          return MaterialApp(
+            title: 'Protego',
+            debugShowCheckedModeBanner: false,
+            themeMode: mode,
+            theme: _buildLightTheme(),
+            darkTheme: _buildDarkTheme(),
+            home: const AuthGate(),
+          );
+        },
+      ),
     );
   }
 }
 
-/// Listens to Firebase auth state and routes accordingly.
 class AuthGate extends StatelessWidget {
   const AuthGate({super.key});
 
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.authStateChanges(),
+      stream: FirebaseAuth.instance.userChanges(),
       builder: (context, snapshot) {
-        // Show loading while checking auth state
         if (snapshot.connectionState == ConnectionState.waiting) {
           return Scaffold(
-            backgroundColor: const Color(0xFF131313),
             body: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Image.asset('assets/logo.png', height: 80),
-                  const SizedBox(height: 24),
-                  const CircularProgressIndicator(
-                    color: Color(0xFFFFB4AA),
-                    strokeWidth: 2.5,
-                  ),
-                ],
+              child: CircularProgressIndicator(
+                color: Theme.of(context).colorScheme.primary,
               ),
             ),
           );
         }
-
-        // User is signed in → Home
         if (snapshot.hasData) {
-          return const HomeScreen();
+          final user = snapshot.data!;
+          final isAllowedSession =
+              user.phoneNumber != null || user.emailVerified;
+          if (isAllowedSession) {
+            return const HomeScreen();
+          }
+          return const VerifyEmailScreen();
         }
-
-        // Not signed in → Sign Up
         return const SignUpScreen();
       },
     );
