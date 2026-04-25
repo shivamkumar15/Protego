@@ -154,10 +154,10 @@ class _SignUpScreenState extends State<SignUpScreen> {
     return Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
           child: Center(
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 440),
+              constraints: const BoxConstraints(maxWidth: 420),
               child: Form(
                 key: _formKey,
                 child: Column(
@@ -168,19 +168,19 @@ class _SignUpScreenState extends State<SignUpScreen> {
                         isDark
                             ? 'assets/DarkThemeLogo.png'
                             : 'assets/LightThemeLogo.png',
-                        height: 104,
+                        height: 92,
                       ),
                     ),
-                    const SizedBox(height: 18),
+                    const SizedBox(height: 14),
                     Center(
                       child: Text('Create account',
                           style: TextStyle(
-                              fontSize: 30,
+                              fontSize: 28,
                               fontWeight: FontWeight.bold,
                               color: theme.colorScheme.onSurface,
                               letterSpacing: -1)),
                     ),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 4),
                     Center(
                       child: Text('Get started with Protego today.',
                           style: TextStyle(
@@ -190,7 +190,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                                 : const Color(0xFF6B7280),
                           )),
                     ),
-                    const SizedBox(height: 28),
+                    const SizedBox(height: 22),
                     buildTextField(
                       context: context,
                       label: 'Full Name',
@@ -198,7 +198,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                       controller: _nameController,
                       validator: AuthValidators.validateName,
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 14),
                     buildTextField(
                       context: context,
                       label: 'Email address',
@@ -207,7 +207,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                       keyboardType: TextInputType.emailAddress,
                       validator: AuthValidators.validateEmail,
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 14),
                     buildTextField(
                       context: context,
                       label: 'Password',
@@ -254,7 +254,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 14),
                     buildTextField(
                       context: context,
                       label: 'Confirm Password',
@@ -275,14 +275,14 @@ class _SignUpScreenState extends State<SignUpScreen> {
                       validator: (v) => AuthValidators.validateConfirmPassword(
                           v, _passwordController.text),
                     ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: 18),
                     buildButton(
                       context: context,
                       label: 'Create account',
                       isLoading: _loadingProvider == 'email',
                       onPressed: _isLoading ? null : _signUpWithEmail,
                     ),
-                    const SizedBox(height: 18),
+                    const SizedBox(height: 14),
                     Row(
                       children: [
                         Expanded(
@@ -305,7 +305,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                                     : const Color(0xFFE5E7EB))),
                       ],
                     ),
-                    const SizedBox(height: 18),
+                    const SizedBox(height: 14),
                     buildButton(
                       context: context,
                       label: 'Continue with Phone',
@@ -340,7 +340,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                         onPressed: _isLoading ? null : _signInWithApple,
                       ),
                     ],
-                    const SizedBox(height: 22),
+                    const SizedBox(height: 16),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [

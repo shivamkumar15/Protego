@@ -1,5 +1,11 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:http/http.dart' as http;
 
 import '../services/auth_service.dart';
 import '../theme_mode_scope.dart';
@@ -108,7 +114,12 @@ class _HomeScreenState extends State<HomeScreen> {
       body: IndexedStack(
         index: _currentIndex,
         children: [
-          _HomeTab(user: user),
+          _HomeTab(
+            user: user,
+            onSosActivated: () {
+              setState(() => _currentIndex = 1);
+            },
+          ),
           const _LiveMapTab(),
           const _EmergencyContactsTab(),
           _ProfileTab(user: user),
@@ -401,14 +412,17 @@ class _LiquidNavBarPainter extends CustomPainter {
 }
 
 class _HomeTab extends StatelessWidget {
-  const _HomeTab({required this.user});
+  const _HomeTab({
+    required this.user,
+    required this.onSosActivated,
+  });
 
   final User? user;
+  final VoidCallback onSosActivated;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
 
     return ListView(
       padding: const EdgeInsets.all(20),
@@ -421,60 +435,585 @@ class _HomeTab extends StatelessWidget {
             color: theme.colorScheme.onSurface,
           ),
         ),
-        const SizedBox(height: 16),
-        _SurfaceCard(
-          child: Row(
-            children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primary.withValues(alpha: 0.16),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(Icons.shield_outlined,
-                    color: theme.colorScheme.primary),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Protection Active',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                        color: theme.colorScheme.onSurface,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      user?.email ?? user?.phoneNumber ?? 'Guardian connected',
-                      style: TextStyle(
-                        color: isDark
-                            ? const Color(0xFFA3A3A3)
-                            : const Color(0xFF6B7280),
-                        fontSize: 14,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
+        const SizedBox(height: 18),
+        _SosHoldButton(onActivated: onSosActivated),
       ],
     );
   }
 }
 
-class _LiveMapTab extends StatelessWidget {
-  const _LiveMapTab();
+class _SosHoldButton extends StatefulWidget {
+  const _SosHoldButton({required this.onActivated});
+
+  final VoidCallback onActivated;
+
+  @override
+  State<_SosHoldButton> createState() => _SosHoldButtonState();
+}
+
+class _SosHoldButtonState extends State<_SosHoldButton>
+    with TickerProviderStateMixin {
+  late final AnimationController _pulseController;
+  late final AnimationController _holdController;
+  bool _isHolding = false;
+  bool _activated = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1300),
+    )..repeat(reverse: true);
+
+    _holdController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+    )..addStatusListener((status) {
+        if (status == AnimationStatus.completed && !_activated) {
+          _activated = true;
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Emergency activated. Help is on the way!',
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.bold)),
+              backgroundColor: Colors.red,
+            ),
+          );
+          widget.onActivated();
+        }
+      });
+  }
+
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    _holdController.dispose();
+    super.dispose();
+  }
+
+  void _startHold() {
+    if (_isHolding) return;
+    setState(() {
+      _isHolding = true;
+      _activated = false;
+    });
+    _holdController.forward(from: 0);
+  }
+
+  void _endHold() {
+    if (!_isHolding) return;
+    setState(() {
+      _isHolding = false;
+    });
+    if (_holdController.isCompleted) {
+      _holdController.value = 0;
+      return;
+    }
+    _holdController.animateBack(0,
+        duration: const Duration(milliseconds: 220), curve: Curves.easeOut);
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    return _SurfaceCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Emergency SOS',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+              color: Colors.red.shade600,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Press and hold for 2 seconds to trigger emergency assistance.',
+            style: TextStyle(
+              color: isDark ? const Color(0xFFA3A3A3) : const Color(0xFF6B7280),
+              fontSize: 13,
+            ),
+          ),
+          const SizedBox(height: 18),
+          Center(
+            child: GestureDetector(
+              onTapDown: (_) => _startHold(),
+              onTapUp: (_) => _endHold(),
+              onTapCancel: _endHold,
+              child: AnimatedBuilder(
+                animation:
+                    Listenable.merge([_pulseController, _holdController]),
+                builder: (context, _) {
+                  final pulse = 1 + (_pulseController.value * 0.05);
+                  return Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Transform.scale(
+                        scale: pulse,
+                        child: Container(
+                          width: 148,
+                          height: 148,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.red
+                                .withValues(alpha: _isHolding ? 0.25 : 0.18),
+                          ),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 136,
+                        height: 136,
+                        child: CircularProgressIndicator(
+                          value: _holdController.value,
+                          strokeWidth: 6,
+                          backgroundColor: isDark
+                              ? const Color(0xFF2A2A2A)
+                              : const Color(0xFFE5E7EB),
+                          valueColor:
+                              const AlwaysStoppedAnimation<Color>(Colors.red),
+                        ),
+                      ),
+                      Container(
+                        width: 110,
+                        height: 110,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              Colors.red.shade500,
+                              Colors.red.shade800,
+                            ],
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.red.withValues(alpha: 0.4),
+                              blurRadius: 18,
+                              offset: const Offset(0, 6),
+                            ),
+                          ],
+                        ),
+                        child: const Center(
+                          child: Text(
+                            'SOS',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 32,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 2,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Center(
+            child: Text(
+              _isHolding
+                  ? 'Hold... ${(_holdController.value * 2).clamp(0, 2).toStringAsFixed(1)}s / 2.0s'
+                  : 'Release before 2 seconds to cancel',
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: _isHolding
+                    ? Colors.red
+                    : (isDark
+                        ? const Color(0xFFA3A3A3)
+                        : const Color(0xFF6B7280)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LiveMapTab extends StatefulWidget {
+  const _LiveMapTab();
+
+  @override
+  State<_LiveMapTab> createState() => _LiveMapTabState();
+}
+
+class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
+  static const String _googleDarkMapStyle = '''
+  [
+    {"elementType":"geometry","stylers":[{"color":"#0f0f0f"}]},
+    {"elementType":"labels.text.fill","stylers":[{"color":"#9ca3af"}]},
+    {"elementType":"labels.text.stroke","stylers":[{"color":"#0b0b0b"}]},
+    {"featureType":"poi","elementType":"labels.icon","stylers":[{"visibility":"off"}]},
+    {"featureType":"road","elementType":"geometry","stylers":[{"color":"#1a1a1a"}]},
+    {"featureType":"road.arterial","elementType":"geometry","stylers":[{"color":"#222222"}]},
+    {"featureType":"road.highway","elementType":"geometry","stylers":[{"color":"#2c2c2c"}]},
+    {"featureType":"water","elementType":"geometry","stylers":[{"color":"#101826"}]}
+  ]
+  ''';
+
+  GoogleMapController? _mapController;
+  StreamSubscription<Position>? _positionSubscription;
+  Position? _position;
+  LatLng? _nearestPoliceStation;
+  LatLng? _lastRouteFetchOrigin;
+  String _nearestPoliceStationName = 'Nearest police station';
+  List<LatLng> _routePoints = const [];
+  double? _routeDistanceKm;
+  double? _routeEtaMinutes;
+  bool _isLoading = true;
+  bool _isRequestingPermission = false;
+  bool _isFetchingPoliceRoute = false;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _initLocationTracking();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _positionSubscription?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _initLocationTracking();
+    }
+  }
+
+  Future<void> _moveCameraTo(LatLng target, {double? zoom}) async {
+    final controller = _mapController;
+    if (controller == null) return;
+    final update = zoom == null
+        ? CameraUpdate.newLatLng(target)
+        : CameraUpdate.newCameraPosition(
+            CameraPosition(target: target, zoom: zoom),
+          );
+    await controller.animateCamera(update);
+  }
+
+  Future<void> _initLocationTracking() async {
+    if (_isRequestingPermission) return;
+    _isRequestingPermission = true;
+
+    setState(() {
+      _isLoading = _position == null;
+      _errorMessage = null;
+    });
+
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      await Geolocator.openLocationSettings();
+      setState(() {
+        _isLoading = false;
+        _errorMessage =
+            'Location is off. Please turn on phone location and return to the app.';
+      });
+      _isRequestingPermission = false;
+      return;
+    }
+
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    if (permission == LocationPermission.denied) {
+      setState(() {
+        _isLoading = false;
+        _errorMessage =
+            'Location permission is required to show your live location.';
+      });
+      _isRequestingPermission = false;
+      return;
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      await Geolocator.openAppSettings();
+      setState(() {
+        _isLoading = false;
+        _errorMessage =
+            'Location permission is permanently denied. Enable it from app settings.';
+      });
+      _isRequestingPermission = false;
+      return;
+    }
+
+    try {
+      final cached = await Geolocator.getLastKnownPosition();
+      if (cached != null && mounted) {
+        setState(() {
+          _position = cached;
+          _isLoading = false;
+        });
+        _moveCameraTo(LatLng(cached.latitude, cached.longitude), zoom: 15.5);
+        await _fetchNearestPoliceRoute(cached, forceRefresh: true);
+      }
+
+      final current = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 8),
+        ),
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _position = current;
+        _isLoading = false;
+      });
+      _moveCameraTo(LatLng(current.latitude, current.longitude), zoom: 16);
+      await _fetchNearestPoliceRoute(current, forceRefresh: true);
+
+      await _positionSubscription?.cancel();
+      _positionSubscription = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          distanceFilter: 8,
+        ),
+      ).listen((position) {
+        if (!mounted) return;
+        setState(() => _position = position);
+        _moveCameraTo(LatLng(position.latitude, position.longitude));
+        _fetchNearestPoliceRoute(position);
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _errorMessage = _position == null
+            ? 'Unable to fetch location right now. Please try again.'
+            : null;
+      });
+    } finally {
+      _isRequestingPermission = false;
+    }
+  }
+
+  Future<void> _fetchNearestPoliceRoute(
+    Position position, {
+    bool forceRefresh = false,
+  }) async {
+    if (_isFetchingPoliceRoute) {
+      return;
+    }
+
+    if (!forceRefresh && _lastRouteFetchOrigin != null) {
+      final movedDistance = Geolocator.distanceBetween(
+        position.latitude,
+        position.longitude,
+        _lastRouteFetchOrigin!.latitude,
+        _lastRouteFetchOrigin!.longitude,
+      );
+      if (movedDistance < 150) {
+        return;
+      }
+    }
+
+    _isFetchingPoliceRoute = true;
+    _lastRouteFetchOrigin = LatLng(position.latitude, position.longitude);
+    try {
+      final station = await _findNearestPoliceStation(
+        latitude: position.latitude,
+        longitude: position.longitude,
+      );
+
+      if (station == null) {
+        if (!mounted || _nearestPoliceStation != null) return;
+        setState(() {
+          _nearestPoliceStationName = 'No nearby police station found';
+          _routePoints = const [];
+          _routeDistanceKm = null;
+          _routeEtaMinutes = null;
+        });
+        return;
+      }
+
+      final route = await _buildRouteToPoliceStation(
+        from: LatLng(position.latitude, position.longitude),
+        to: station.position,
+      );
+
+      if (!mounted) return;
+      final distanceMeters = route?.distanceMeters;
+      final durationSeconds = route?.durationSeconds;
+      setState(() {
+        _nearestPoliceStation = station.position;
+        _nearestPoliceStationName = station.name;
+        _routePoints = route?.points ??
+            [
+              LatLng(position.latitude, position.longitude),
+              station.position,
+            ];
+        _routeDistanceKm =
+            distanceMeters != null ? distanceMeters / 1000 : null;
+        _routeEtaMinutes =
+            durationSeconds != null ? durationSeconds / 60 : null;
+      });
+    } catch (_) {
+      if (!mounted || _nearestPoliceStation != null) return;
+      setState(() {
+        _nearestPoliceStationName = 'Unable to load nearest police station';
+      });
+    } finally {
+      _isFetchingPoliceRoute = false;
+    }
+  }
+
+  Future<_PoliceStation?> _findNearestPoliceStation({
+    required double latitude,
+    required double longitude,
+  }) async {
+    final query =
+        '[out:json][timeout:20];(node["amenity"="police"](around:7000,$latitude,$longitude);way["amenity"="police"](around:7000,$latitude,$longitude););out center 1;';
+    final uri =
+        Uri.https('overpass-api.de', '/api/interpreter', {'data': query});
+    final response = await http.get(uri, headers: {
+      'User-Agent': 'Protego/1.0 (safety app)',
+      'Accept': 'application/json',
+    });
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return null;
+    }
+
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map<String, dynamic>) {
+      return null;
+    }
+
+    final elements = decoded['elements'];
+    if (elements is! List || elements.isEmpty) {
+      return null;
+    }
+
+    Map<String, dynamic>? closest;
+    double? closestDistance;
+    for (final item in elements) {
+      if (item is! Map<String, dynamic>) continue;
+
+      final lat = (item['lat'] as num?)?.toDouble() ??
+          (item['center'] is Map<String, dynamic>
+              ? ((item['center']['lat'] as num?)?.toDouble())
+              : null);
+      final lon = (item['lon'] as num?)?.toDouble() ??
+          (item['center'] is Map<String, dynamic>
+              ? ((item['center']['lon'] as num?)?.toDouble())
+              : null);
+      if (lat == null || lon == null) continue;
+
+      final distance =
+          Geolocator.distanceBetween(latitude, longitude, lat, lon);
+      if (closestDistance == null || distance < closestDistance) {
+        closestDistance = distance;
+        closest = item;
+      }
+    }
+
+    if (closest == null) {
+      return null;
+    }
+
+    final tags = closest['tags'];
+    final lat = (closest['lat'] as num?)?.toDouble() ??
+        (closest['center'] is Map<String, dynamic>
+            ? ((closest['center']['lat'] as num?)?.toDouble())
+            : null);
+    final lon = (closest['lon'] as num?)?.toDouble() ??
+        (closest['center'] is Map<String, dynamic>
+            ? ((closest['center']['lon'] as num?)?.toDouble())
+            : null);
+    if (lat == null || lon == null) {
+      return null;
+    }
+
+    final name = tags is Map<String, dynamic>
+        ? (tags['name'] as String?) ?? 'Nearest police station'
+        : 'Nearest police station';
+
+    return _PoliceStation(
+      name: name,
+      position: LatLng(lat, lon),
+    );
+  }
+
+  Future<_RouteInfo?> _buildRouteToPoliceStation({
+    required LatLng from,
+    required LatLng to,
+  }) async {
+    final coordinates =
+        '${from.longitude},${from.latitude};${to.longitude},${to.latitude}';
+    final uri =
+        Uri.https('router.project-osrm.org', '/route/v1/driving/$coordinates', {
+      'overview': 'full',
+      'geometries': 'geojson',
+    });
+    final response = await http.get(uri, headers: {
+      'User-Agent': 'Protego/1.0 (safety app)',
+      'Accept': 'application/json',
+    });
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return null;
+    }
+
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map<String, dynamic>) {
+      return null;
+    }
+
+    final routes = decoded['routes'];
+    if (routes is! List ||
+        routes.isEmpty ||
+        routes.first is! Map<String, dynamic>) {
+      return null;
+    }
+
+    final firstRoute = routes.first as Map<String, dynamic>;
+    final distanceMeters = (firstRoute['distance'] as num?)?.toDouble();
+    final durationSeconds = (firstRoute['duration'] as num?)?.toDouble();
+
+    final geometry = firstRoute['geometry'];
+    final coordinatesList =
+        geometry is Map<String, dynamic> ? geometry['coordinates'] : null;
+
+    final points = <LatLng>[];
+    if (coordinatesList is List) {
+      for (final coordinate in coordinatesList) {
+        if (coordinate is! List || coordinate.length < 2) continue;
+        final lon = (coordinate[0] as num?)?.toDouble();
+        final lat = (coordinate[1] as num?)?.toDouble();
+        if (lat == null || lon == null) continue;
+        points.add(LatLng(lat, lon));
+      }
+    }
+
+    return _RouteInfo(
+      points: points,
+      distanceMeters: distanceMeters,
+      durationSeconds: durationSeconds,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
 
     return ListView(
       padding: const EdgeInsets.all(20),
@@ -497,18 +1036,312 @@ class _LiveMapTab extends StatelessWidget {
                   ),
                 ],
               ),
-              const SizedBox(height: 10),
-              Text(
-                'Map integration section is ready. Connect it to your realtime location stream.',
-                style: TextStyle(
-                    color: theme.colorScheme.onSurface.withValues(alpha: 0.75)),
+              const SizedBox(height: 12),
+              if (_errorMessage != null) ...[
+                Text(
+                  _errorMessage!,
+                  style: TextStyle(
+                    color: theme.colorScheme.onSurface.withValues(alpha: 0.75),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: SizedBox(
+                  height: 520,
+                  child: Stack(
+                    children: [
+                      Positioned.fill(child: _buildMapContent(theme, isDark)),
+                      if (!_isLoading && _position != null)
+                        Positioned.fill(child: _buildMapOverlay(theme, isDark)),
+                    ],
+                  ),
+                ),
               ),
+              if (_errorMessage != null) ...[
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: ElevatedButton(
+                    onPressed: _isLoading ? null : _initLocationTracking,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: theme.colorScheme.primary,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: _isLoading
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Text(
+                            'Retry Location Access',
+                            style: TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
       ],
     );
   }
+
+  Widget _buildMapContent(ThemeData theme, bool isDark) {
+    if (_isLoading) {
+      return ColoredBox(
+        color: isDark ? const Color(0xFF101010) : const Color(0xFFF8FAFC),
+        child: Center(
+          child: CircularProgressIndicator(color: theme.colorScheme.primary),
+        ),
+      );
+    }
+
+    if (_position == null) {
+      return ColoredBox(
+        color: isDark ? const Color(0xFF101010) : const Color(0xFFF8FAFC),
+        child: Center(
+          child: Text(
+            'Location unavailable',
+            style: TextStyle(color: theme.colorScheme.onSurface),
+          ),
+        ),
+      );
+    }
+
+    final current = LatLng(_position!.latitude, _position!.longitude);
+    final destination = _nearestPoliceStation;
+    final routePoints = _routePoints.length >= 2
+        ? _routePoints
+        : (destination != null ? [current, destination] : const <LatLng>[]);
+
+    final markers = <Marker>{
+      Marker(
+        markerId: const MarkerId('current_location'),
+        position: current,
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+        infoWindow: const InfoWindow(title: 'Your Location'),
+      ),
+      if (destination != null)
+        Marker(
+          markerId: const MarkerId('nearest_police_station'),
+          position: destination,
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+          infoWindow: InfoWindow(title: _nearestPoliceStationName),
+        ),
+    };
+
+    final circles = <Circle>{
+      Circle(
+        circleId: const CircleId('accuracy'),
+        center: current,
+        radius: _position!.accuracy.clamp(20, 120).toDouble(),
+        fillColor: theme.colorScheme.primary.withValues(alpha: 0.16),
+        strokeColor: theme.colorScheme.primary.withValues(alpha: 0.55),
+        strokeWidth: 1,
+      ),
+    };
+
+    final polylines = <Polyline>{
+      if (routePoints.length >= 2)
+        Polyline(
+          polylineId: const PolylineId('route_to_police'),
+          points: routePoints,
+          color: theme.colorScheme.primary.withValues(alpha: 0.9),
+          width: 6,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+        ),
+    };
+
+    return GoogleMap(
+      initialCameraPosition: CameraPosition(target: current, zoom: 16),
+      style: isDark ? _googleDarkMapStyle : null,
+      myLocationEnabled: false,
+      myLocationButtonEnabled: false,
+      compassEnabled: true,
+      mapToolbarEnabled: false,
+      zoomControlsEnabled: false,
+      mapType: MapType.normal,
+      markers: markers,
+      circles: circles,
+      polylines: polylines,
+      onMapCreated: (controller) {
+        _mapController = controller;
+        _moveCameraTo(current, zoom: 16);
+      },
+    );
+  }
+
+  Widget _buildMapOverlay(ThemeData theme, bool isDark) {
+    final distanceText = _routeDistanceKm == null
+        ? '--'
+        : '${_routeDistanceKm!.toStringAsFixed(_routeDistanceKm! < 10 ? 1 : 0)} km';
+    final etaText =
+        _routeEtaMinutes == null ? '--' : '${_routeEtaMinutes!.round()} min';
+
+    return IgnorePointer(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: isDark ? 0.62 : 0.7),
+                    borderRadius: BorderRadius.circular(999),
+                    border:
+                        Border.all(color: Colors.white.withValues(alpha: 0.18)),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.local_police,
+                          color: Color(0xFFFFD54F), size: 16),
+                      SizedBox(width: 6),
+                      Text(
+                        'Police Route',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Spacer(),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: isDark ? 0.62 : 0.7),
+                    borderRadius: BorderRadius.circular(999),
+                    border:
+                        Border.all(color: Colors.white.withValues(alpha: 0.18)),
+                  ),
+                  child: Text(
+                    'GPS ${_position!.accuracy.toStringAsFixed(0)}m',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const Spacer(),
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: isDark ? 0.7 : 0.82),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.primary.withValues(alpha: 0.22),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(Icons.route, color: theme.colorScheme.primary),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _nearestPoliceStationName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 14,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _nearestPoliceStation == null
+                              ? 'Finding nearest police station...'
+                              : 'Direction ready from your live location',
+                          style: const TextStyle(
+                            color: Color(0xFFD1D5DB),
+                            fontWeight: FontWeight.w500,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.bottomRight,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: isDark ? 0.68 : 0.78),
+                  borderRadius: BorderRadius.circular(12),
+                  border:
+                      Border.all(color: Colors.white.withValues(alpha: 0.14)),
+                ),
+                child: Text(
+                  'Distance: $distanceText   ETA: $etaText',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PoliceStation {
+  const _PoliceStation({required this.name, required this.position});
+
+  final String name;
+  final LatLng position;
+}
+
+class _RouteInfo {
+  const _RouteInfo({
+    required this.points,
+    required this.distanceMeters,
+    required this.durationSeconds,
+  });
+
+  final List<LatLng> points;
+  final double? distanceMeters;
+  final double? durationSeconds;
 }
 
 class _EmergencyContactsTab extends StatelessWidget {
