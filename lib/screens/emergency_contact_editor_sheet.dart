@@ -1,0 +1,306 @@
+import 'package:flutter/material.dart';
+
+import '../services/emergency_contacts_service.dart';
+import '../ui_components.dart';
+
+Future<bool> showEmergencyContactEditorSheet(
+  BuildContext context, {
+  EmergencyContact? contact,
+  bool suggestPrimary = false,
+  required Future<void> Function(EmergencyContact contact) onSave,
+}) async {
+  final formKey = GlobalKey<FormState>();
+  final nameController = TextEditingController(text: contact?.name ?? '');
+  final phoneController =
+      TextEditingController(text: contact?.phoneNumber ?? '');
+  var isPrimary = contact?.isPrimary ?? suggestPrimary;
+  var isSaving = false;
+
+  final saved = await showModalBottomSheet<bool>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (sheetContext) {
+      final theme = Theme.of(sheetContext);
+      final isDark = theme.brightness == Brightness.dark;
+
+      return StatefulBuilder(
+        builder: (context, setModalState) {
+          return SafeArea(
+            top: false,
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                12,
+                0,
+                12,
+                MediaQuery.of(sheetContext).viewInsets.bottom + 12,
+              ),
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surface,
+                  borderRadius: BorderRadius.circular(28),
+                  border: Border.all(
+                    color: isDark
+                        ? const Color(0xFF2A2A2A)
+                        : const Color(0xFFE5E7EB),
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color:
+                          Colors.black.withValues(alpha: isDark ? 0.28 : 0.08),
+                      blurRadius: 24,
+                      offset: const Offset(0, 12),
+                    ),
+                  ],
+                ),
+                child: Form(
+                  key: formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 42,
+                          height: 5,
+                          decoration: BoxDecoration(
+                            color: isDark
+                                ? const Color(0xFF353535)
+                                : const Color(0xFFD1D5DB),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      Row(
+                        children: [
+                          Container(
+                            width: 52,
+                            height: 52,
+                            decoration: BoxDecoration(
+                              color: theme.colorScheme.primary
+                                  .withValues(alpha: 0.14),
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: Icon(
+                              contact == null
+                                  ? Icons.person_add_alt_1
+                                  : Icons.edit_outlined,
+                              color: theme.colorScheme.primary,
+                            ),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  contact == null
+                                      ? 'Add emergency contact'
+                                      : 'Update contact',
+                                  style: TextStyle(
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w800,
+                                    color: theme.colorScheme.onSurface,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Save someone you can reach quickly during an emergency.',
+                                  style: TextStyle(
+                                    color: isDark
+                                        ? const Color(0xFFA3A3A3)
+                                        : const Color(0xFF6B7280),
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 18),
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color:
+                              theme.colorScheme.primary.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              Icons.info_outline,
+                              color: theme.colorScheme.primary,
+                              size: 18,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'Tip: add a close family member first and mark them as primary.',
+                                style: TextStyle(
+                                  color: theme.colorScheme.onSurface,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      buildTextField(
+                        context: sheetContext,
+                        label: 'Contact name',
+                        hint: '',
+                        controller: nameController,
+                        validator: (value) {
+                          if ((value ?? '').trim().isEmpty) {
+                            return 'Enter a contact name';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 14),
+                      buildTextField(
+                        context: sheetContext,
+                        label: 'Phone number',
+                        hint: '',
+                        controller: phoneController,
+                        keyboardType: TextInputType.phone,
+                        validator: (value) {
+                          final normalized = (value ?? '').trim();
+                          if (normalized.isEmpty) {
+                            return 'Enter a phone number';
+                          }
+                          if (normalized.length < 8) {
+                            return 'Enter a valid phone number';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: isDark
+                              ? const Color(0xFF111111)
+                              : const Color(0xFFF8FAFC),
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(
+                            color: isDark
+                                ? const Color(0xFF2A2A2A)
+                                : const Color(0xFFE5E7EB),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 34,
+                              height: 34,
+                              decoration: BoxDecoration(
+                                color: theme.colorScheme.primary
+                                    .withValues(alpha: 0.14),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Icon(
+                                Icons.star_rounded,
+                                color: theme.colorScheme.primary,
+                                size: 18,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Primary contact',
+                                    style: TextStyle(
+                                      color: theme.colorScheme.onSurface,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  Text(
+                                    'This person will appear first in your emergency list.',
+                                    style: TextStyle(
+                                      color: isDark
+                                          ? const Color(0xFFA3A3A3)
+                                          : const Color(0xFF6B7280),
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Switch.adaptive(
+                              value: isPrimary,
+                              onChanged: (value) {
+                                setModalState(() => isPrimary = value);
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: isSaving
+                                  ? null
+                                  : () => Navigator.of(sheetContext).pop(false),
+                              child: const Text('Cancel'),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            flex: 2,
+                            child: buildButton(
+                              context: sheetContext,
+                              label: contact == null
+                                  ? 'Save contact'
+                                  : 'Update contact',
+                              isLoading: isSaving,
+                              onPressed: isSaving
+                                  ? null
+                                  : () async {
+                                      if (!formKey.currentState!.validate()) {
+                                        return;
+                                      }
+                                      setModalState(() => isSaving = true);
+                                      await onSave(
+                                        EmergencyContact(
+                                          id: contact?.id,
+                                          userId: contact?.userId ?? '',
+                                          name: nameController.text.trim(),
+                                          phoneNumber:
+                                              phoneController.text.trim(),
+                                          isPrimary: isPrimary,
+                                        ),
+                                      );
+                                      if (!sheetContext.mounted) {
+                                        return;
+                                      }
+                                      Navigator.of(sheetContext).pop(true);
+                                    },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      );
+    },
+  );
+
+  return saved ?? false;
+}

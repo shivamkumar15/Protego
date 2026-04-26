@@ -8,19 +8,29 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart' as latlng;
+import 'package:url_launcher/url_launcher.dart';
 
 import '../services/auth_service.dart';
+import '../services/emergency_contacts_service.dart';
+import '../services/sos_recording_service.dart';
 import '../theme_mode_scope.dart';
+import 'emergency_contact_editor_sheet.dart';
+import 'sos_recordings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  const HomeScreen({super.key, this.initialIndex = 0});
+
+  final int initialIndex;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  int _currentIndex = 0;
+  late int _currentIndex;
+  final SosRecordingService _sosRecordingService = SosRecordingService();
+  bool _isSosActive = false;
+  String? _activeSosRecordingPath;
 
   static const _titles = <String>[
     'Home',
@@ -57,6 +67,63 @@ class _HomeScreenState extends State<HomeScreen> {
       label: 'Settings',
     ),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _currentIndex = widget.initialIndex;
+  }
+
+  Future<void> _handleSosActivated() async {
+    try {
+      final recordingPath = await _sosRecordingService.startRecording();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isSosActive = true;
+        _activeSosRecordingPath = recordingPath;
+        _currentIndex = 1;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Help is on the way. SOS recording started.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.toString().replaceFirst('Bad state: ', '')),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _stopSos() async {
+    final recordingPath = await _sosRecordingService.stopRecording();
+    final savedPath = recordingPath ?? _activeSosRecordingPath;
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _isSosActive = false;
+      _activeSosRecordingPath = savedPath;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          savedPath == null
+              ? 'SOS stopped. Recording ended.'
+              : 'SOS stopped. Recording saved to $savedPath',
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -118,11 +185,14 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           _HomeTab(
             user: user,
-            onSosActivated: () {
-              setState(() => _currentIndex = 1);
-            },
+            isSosActive: _isSosActive,
+            onSosActivated: _handleSosActivated,
+            onStopSos: _stopSos,
           ),
-          const _LiveMapTab(),
+          _LiveMapTab(
+            isSosActive: _isSosActive,
+            onStopSos: _stopSos,
+          ),
           const _EmergencyContactsTab(),
           _ProfileTab(user: user),
           _SettingsTab(themeModeController: themeModeController),
@@ -416,11 +486,15 @@ class _LiquidNavBarPainter extends CustomPainter {
 class _HomeTab extends StatelessWidget {
   const _HomeTab({
     required this.user,
+    required this.isSosActive,
     required this.onSosActivated,
+    required this.onStopSos,
   });
 
   final User? user;
-  final VoidCallback onSosActivated;
+  final bool isSosActive;
+  final Future<void> Function() onSosActivated;
+  final Future<void> Function() onStopSos;
 
   @override
   Widget build(BuildContext context) {
@@ -438,16 +512,26 @@ class _HomeTab extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 18),
-        _SosHoldButton(onActivated: onSosActivated),
+        _SosHoldButton(
+          isSosActive: isSosActive,
+          onActivated: onSosActivated,
+          onStop: onStopSos,
+        ),
       ],
     );
   }
 }
 
 class _SosHoldButton extends StatefulWidget {
-  const _SosHoldButton({required this.onActivated});
+  const _SosHoldButton({
+    required this.isSosActive,
+    required this.onActivated,
+    required this.onStop,
+  });
 
-  final VoidCallback onActivated;
+  final bool isSosActive;
+  final Future<void> Function() onActivated;
+  final Future<void> Function() onStop;
 
   @override
   State<_SosHoldButton> createState() => _SosHoldButtonState();
@@ -459,6 +543,7 @@ class _SosHoldButtonState extends State<_SosHoldButton>
   late final AnimationController _holdController;
   bool _isHolding = false;
   bool _activated = false;
+  bool _isProcessing = false;
 
   @override
   void initState() {
@@ -474,16 +559,7 @@ class _SosHoldButtonState extends State<_SosHoldButton>
     )..addStatusListener((status) {
         if (status == AnimationStatus.completed && !_activated) {
           _activated = true;
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Emergency activated. Help is on the way!',
-                  style: TextStyle(
-                      color: Colors.white, fontWeight: FontWeight.bold)),
-              backgroundColor: Colors.red,
-            ),
-          );
-          widget.onActivated();
+          _activateSos();
         }
       });
   }
@@ -496,7 +572,7 @@ class _SosHoldButtonState extends State<_SosHoldButton>
   }
 
   void _startHold() {
-    if (_isHolding) return;
+    if (_isHolding || widget.isSosActive || _isProcessing) return;
     setState(() {
       _isHolding = true;
       _activated = false;
@@ -515,6 +591,44 @@ class _SosHoldButtonState extends State<_SosHoldButton>
     }
     _holdController.animateBack(0,
         duration: const Duration(milliseconds: 220), curve: Curves.easeOut);
+  }
+
+  Future<void> _activateSos() async {
+    if (_isProcessing) {
+      return;
+    }
+    setState(() {
+      _isProcessing = true;
+      _isHolding = false;
+    });
+    try {
+      await widget.onActivated();
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+          _holdController.value = 0;
+        });
+      }
+    }
+  }
+
+  Future<void> _stopSos() async {
+    if (_isProcessing) {
+      return;
+    }
+    setState(() {
+      _isProcessing = true;
+    });
+    try {
+      await widget.onStop();
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
+    }
   }
 
   @override
@@ -536,7 +650,9 @@ class _SosHoldButtonState extends State<_SosHoldButton>
           ),
           const SizedBox(height: 6),
           Text(
-            'Press and hold for 2 seconds to trigger emergency assistance.',
+            widget.isSosActive
+                ? 'SOS is active. Voice recording is running and saved locally.'
+                : 'Press and hold for 2 seconds to trigger emergency assistance.',
             style: TextStyle(
               color: isDark ? const Color(0xFFA3A3A3) : const Color(0xFF6B7280),
               fontSize: 13,
@@ -544,88 +660,116 @@ class _SosHoldButtonState extends State<_SosHoldButton>
           ),
           const SizedBox(height: 18),
           Center(
-            child: GestureDetector(
-              onTapDown: (_) => _startHold(),
-              onTapUp: (_) => _endHold(),
-              onTapCancel: _endHold,
-              child: AnimatedBuilder(
-                animation:
-                    Listenable.merge([_pulseController, _holdController]),
-                builder: (context, _) {
-                  final pulse = 1 + (_pulseController.value * 0.05);
-                  return Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      Transform.scale(
-                        scale: pulse,
-                        child: Container(
-                          width: 148,
-                          height: 148,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: Colors.red
-                                .withValues(alpha: _isHolding ? 0.25 : 0.18),
-                          ),
-                        ),
+            child: widget.isSosActive
+                ? SizedBox(
+                    width: 210,
+                    child: FilledButton.icon(
+                      onPressed: _isProcessing ? null : _stopSos,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.red.shade700,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
                       ),
-                      SizedBox(
-                        width: 136,
-                        height: 136,
-                        child: CircularProgressIndicator(
-                          value: _holdController.value,
-                          strokeWidth: 6,
-                          backgroundColor: isDark
-                              ? const Color(0xFF2A2A2A)
-                              : const Color(0xFFE5E7EB),
-                          valueColor:
-                              const AlwaysStoppedAnimation<Color>(Colors.red),
-                        ),
+                      icon: _isProcessing
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.stop_circle_outlined),
+                      label: const Text(
+                        'Stop SOS',
+                        style: TextStyle(fontWeight: FontWeight.w700),
                       ),
-                      Container(
-                        width: 110,
-                        height: 110,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          gradient: LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: [
-                              Colors.red.shade500,
-                              Colors.red.shade800,
-                            ],
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.red.withValues(alpha: 0.4),
-                              blurRadius: 18,
-                              offset: const Offset(0, 6),
+                    ),
+                  )
+                : GestureDetector(
+                    onTapDown: (_) => _startHold(),
+                    onTapUp: (_) => _endHold(),
+                    onTapCancel: _endHold,
+                    child: AnimatedBuilder(
+                      animation:
+                          Listenable.merge([_pulseController, _holdController]),
+                      builder: (context, _) {
+                        final pulse = 1 + (_pulseController.value * 0.05);
+                        return Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            Transform.scale(
+                              scale: pulse,
+                              child: Container(
+                                width: 148,
+                                height: 148,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: Colors.red.withValues(
+                                      alpha: _isHolding ? 0.25 : 0.18),
+                                ),
+                              ),
+                            ),
+                            SizedBox(
+                              width: 136,
+                              height: 136,
+                              child: CircularProgressIndicator(
+                                value: _holdController.value,
+                                strokeWidth: 6,
+                                backgroundColor: isDark
+                                    ? const Color(0xFF2A2A2A)
+                                    : const Color(0xFFE5E7EB),
+                                valueColor: const AlwaysStoppedAnimation<Color>(
+                                    Colors.red),
+                              ),
+                            ),
+                            Container(
+                              width: 110,
+                              height: 110,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                gradient: LinearGradient(
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
+                                  colors: [
+                                    Colors.red.shade500,
+                                    Colors.red.shade800,
+                                  ],
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.red.withValues(alpha: 0.4),
+                                    blurRadius: 18,
+                                    offset: const Offset(0, 6),
+                                  ),
+                                ],
+                              ),
+                              child: const Center(
+                                child: Text(
+                                  'SOS',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 32,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 2,
+                                  ),
+                                ),
+                              ),
                             ),
                           ],
-                        ),
-                        child: const Center(
-                          child: Text(
-                            'SOS',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 32,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 2,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  );
-                },
-              ),
-            ),
+                        );
+                      },
+                    ),
+                  ),
           ),
           const SizedBox(height: 12),
           Center(
             child: Text(
-              _isHolding
-                  ? 'Hold... ${(_holdController.value * 2).clamp(0, 2).toStringAsFixed(1)}s / 2.0s'
-                  : 'Release before 2 seconds to cancel',
+              widget.isSosActive
+                  ? 'Recording will stop automatically when SOS is stopped'
+                  : _isHolding
+                      ? 'Hold... ${(_holdController.value * 2).clamp(0, 2).toStringAsFixed(1)}s / 2.0s'
+                      : 'Release before 2 seconds to cancel',
               style: TextStyle(
                 fontWeight: FontWeight.w600,
                 color: _isHolding
@@ -643,7 +787,10 @@ class _SosHoldButtonState extends State<_SosHoldButton>
 }
 
 class _LiveMapTab extends StatefulWidget {
-  const _LiveMapTab();
+  const _LiveMapTab({required this.isSosActive, required this.onStopSos});
+
+  final bool isSosActive;
+  final Future<void> Function() onStopSos;
 
   @override
   State<_LiveMapTab> createState() => _LiveMapTabState();
@@ -1358,6 +1505,39 @@ out body;
                 ],
               ),
               const SizedBox(height: 12),
+              if (widget.isSosActive) ...[
+                Container(
+                  width: double.infinity,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(14),
+                    border:
+                        Border.all(color: Colors.red.withValues(alpha: 0.35)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.mic, color: Colors.red),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'SOS is active. Voice recording is running and stored locally.',
+                          style: TextStyle(
+                            color: theme.colorScheme.onSurface,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: widget.onStopSos,
+                        child: const Text('Stop SOS'),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
               if (_errorMessage != null) ...[
                 Text(
                   _errorMessage!,
@@ -1790,58 +1970,278 @@ class _ShortestPathResult {
   final double distanceMeters;
 }
 
-class _EmergencyContactsTab extends StatelessWidget {
+class _EmergencyContactsTab extends StatefulWidget {
   const _EmergencyContactsTab();
 
   @override
+  State<_EmergencyContactsTab> createState() => _EmergencyContactsTabState();
+}
+
+class _EmergencyContactsTabState extends State<_EmergencyContactsTab> {
+  final _service = EmergencyContactsService();
+  bool _isLoading = true;
+  List<EmergencyContact> _contacts = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadContacts();
+  }
+
+  Future<void> _loadContacts() async {
+    final contacts = await _service.getContacts();
+    if (!mounted) return;
+    setState(() {
+      _contacts = contacts;
+      _isLoading = false;
+    });
+  }
+
+  Future<void> _openContactSheet({EmergencyContact? contact}) async {
+    final didSave = await showEmergencyContactEditorSheet(
+      context,
+      contact: contact,
+      suggestPrimary: _contacts.isEmpty,
+      onSave: _service.saveContact,
+    );
+    if (!mounted || !didSave) return;
+    await _loadContacts();
+  }
+
+  Future<void> _callContact(String phoneNumber) async {
+    final uri = Uri(scheme: 'tel', path: phoneNumber);
+    if (!await launchUrl(uri)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not place the call.')),
+      );
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    if (_isLoading) {
+      return Center(
+        child: CircularProgressIndicator(color: theme.colorScheme.primary),
+      );
+    }
+
     return ListView(
       padding: const EdgeInsets.all(20),
-      children: const [
-        _EmergencyContactTile(name: 'Police', number: '100'),
-        SizedBox(height: 10),
-        _EmergencyContactTile(name: 'Ambulance', number: '102'),
-        SizedBox(height: 10),
-        _EmergencyContactTile(name: 'Women Helpline', number: '1091'),
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Emergency Contacts',
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: theme.colorScheme.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Keep trusted people ready for one-tap access.',
+                    style: TextStyle(
+                      color: isDark
+                          ? const Color(0xFFA3A3A3)
+                          : const Color(0xFF6B7280),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            FilledButton.icon(
+              onPressed: () => _openContactSheet(),
+              icon: const Icon(Icons.add),
+              label: const Text('Add'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.primary.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primary.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(
+                  Icons.shield_outlined,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  _contacts.isEmpty
+                      ? 'Add at least one trusted person so you can reach them quickly in an emergency.'
+                      : 'Tap any card below to call, edit, or remove a saved contact.',
+                  style: TextStyle(
+                    color: theme.colorScheme.onSurface,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        if (_contacts.isEmpty)
+          _SurfaceCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'No contacts saved yet',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: theme.colorScheme.onSurface,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Add trusted contacts so you can call them quickly during emergencies.',
+                  style: TextStyle(
+                    color: isDark
+                        ? const Color(0xFFA3A3A3)
+                        : const Color(0xFF6B7280),
+                  ),
+                ),
+              ],
+            ),
+          )
+        else
+          ..._contacts.map(
+            (contact) => Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: _StoredEmergencyContactTile(
+                contact: contact,
+                onCall: () => _callContact(contact.phoneNumber),
+                onEdit: () => _openContactSheet(contact: contact),
+                onDelete: () async {
+                  await _service.deleteContact(contact.id!);
+                  await _loadContacts();
+                },
+              ),
+            ),
+          ),
       ],
     );
   }
 }
 
-class _EmergencyContactTile extends StatelessWidget {
-  const _EmergencyContactTile({required this.name, required this.number});
+class _StoredEmergencyContactTile extends StatelessWidget {
+  const _StoredEmergencyContactTile({
+    required this.contact,
+    required this.onCall,
+    required this.onEdit,
+    required this.onDelete,
+  });
 
-  final String name;
-  final String number;
+  final EmergencyContact contact;
+  final VoidCallback onCall;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+
     return _SurfaceCard(
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              color: theme.colorScheme.primary.withValues(alpha: 0.16),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Icon(Icons.call, color: theme.colorScheme.primary, size: 20),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              '$name - $number',
-              style: TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-                color: theme.colorScheme.onSurface,
+          Row(
+            children: [
+              const Icon(Icons.person_outline),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  contact.name,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: theme.colorScheme.onSurface,
+                  ),
+                ),
               ),
-            ),
+              if (contact.isPrimary)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primary.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    'Primary',
+                    style: TextStyle(
+                      color: theme.colorScheme.primary,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+            ],
           ),
-          Icon(Icons.arrow_forward_ios,
-              size: 14, color: theme.colorScheme.onSurface),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const Icon(Icons.phone_iphone, size: 18),
+              const SizedBox(width: 8),
+              Text(
+                contact.phoneNumber,
+                style: TextStyle(color: theme.colorScheme.onSurface),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: onCall,
+                  icon: const Icon(Icons.call_outlined),
+                  label: const Text('Call'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: onEdit,
+                  icon: const Icon(Icons.edit_outlined),
+                  label: const Text('Edit'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: onDelete,
+                  icon: const Icon(Icons.delete_outline),
+                  label: const Text('Delete'),
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -1856,6 +2256,7 @@ class _ProfileTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
@@ -1876,6 +2277,70 @@ class _ProfileTab extends StatelessWidget {
               _ProfileRow(label: 'Email', value: user?.email ?? 'Not linked'),
               _ProfileRow(
                   label: 'Phone', value: user?.phoneNumber ?? 'Not linked'),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        _SurfaceCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.primary.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(
+                      Icons.library_music_outlined,
+                      color: theme.colorScheme.primary,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'SOS recordings',
+                          style: TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w700,
+                            color: theme.colorScheme.onSurface,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Open the locally stored emergency audio files and review their saved file paths.',
+                          style: TextStyle(
+                            color: isDark
+                                ? const Color(0xFFA3A3A3)
+                                : const Color(0xFF6B7280),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const SosRecordingsScreen(),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.playlist_play),
+                  label: const Text('View SOS Recordings'),
+                ),
+              ),
             ],
           ),
         ),

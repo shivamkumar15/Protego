@@ -6,7 +6,9 @@ import 'firebase_options.dart';
 import 'theme_mode_scope.dart';
 import 'screens/signup_screen.dart';
 import 'screens/home_screen.dart';
+import 'screens/emergency_contacts_setup_screen.dart';
 import 'screens/verify_email_screen.dart';
+import 'services/emergency_contacts_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -188,7 +190,25 @@ class AuthGate extends StatelessWidget {
           final isAllowedSession =
               user.phoneNumber != null || user.emailVerified;
           if (isAllowedSession) {
-            return const HomeScreen();
+            return FutureBuilder<bool>(
+              future: EmergencyContactsService().shouldShowOnboarding(),
+              builder: (context, onboardingSnapshot) {
+                if (onboardingSnapshot.connectionState ==
+                    ConnectionState.waiting) {
+                  return Scaffold(
+                    body: Center(
+                      child: CircularProgressIndicator(
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                  );
+                }
+                if (onboardingSnapshot.data ?? false) {
+                  return const EmergencyContactsSetupScreen();
+                }
+                return const HomeScreen();
+              },
+            );
           }
           return const VerifyEmailScreen();
         }
