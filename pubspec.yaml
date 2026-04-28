@@ -34,6 +34,9 @@ dependencies:
   sqflite: ^2.4.2
   url_launcher: ^6.3.2
   open_filex: ^4.7.0
+  supabase_flutter: ^2.12.4
+  image_picker: ^1.2.0
+  camera: ^0.11.2+1
 
 dev_dependencies:
   flutter_test:
@@ -52,6 +55,4 @@ flutter_launcher_icons:
 flutter:
   uses-material-design: true
   assets:
-    - assets/LightThemeLogo.png
-    - assets/DarkThemeLogo.png
-    - assets/MainIcon.png
+    - assets/

@@ -4,6 +4,8 @@ import 'package:crypto/crypto.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+import 'package:supabase_flutter/supabase_flutter.dart'
+    hide OAuthProvider, User;
 
 class AuthService {
   AuthService._();
@@ -49,7 +51,7 @@ class AuthService {
     required String fullName,
   }) async {
     final credential = await _auth.createUserWithEmailAndPassword(
-      email: email,
+      email: email.trim(),
       password: password,
     );
 
@@ -68,7 +70,7 @@ class AuthService {
     required String password,
   }) async {
     final credential = await _auth.signInWithEmailAndPassword(
-      email: email,
+      email: email.trim(),
       password: password,
     );
 
@@ -124,11 +126,12 @@ class AuthService {
       verificationId: verificationId,
       smsCode: smsCode,
     );
-    return await _auth.signInWithCredential(credential);
+    final userCredential = await _auth.signInWithCredential(credential);
+    return userCredential;
   }
 
   Future<UserCredential> signInWithCredential(AuthCredential credential) async {
-    return await _auth.signInWithCredential(credential);
+    return _auth.signInWithCredential(credential);
   }
 
   // ── Google Sign-In ───────────────────────────────────────────
@@ -149,7 +152,7 @@ class AuthService {
       idToken: googleAuth.idToken,
     );
 
-    return await _auth.signInWithCredential(credential);
+    return _auth.signInWithCredential(credential);
   }
 
   // ── Apple Sign-In (iOS) ──────────────────────────────────────
@@ -204,12 +207,21 @@ class AuthService {
 
   // ── Sign Out ─────────────────────────────────────────────────
   Future<void> signOut() async {
-    await GoogleSignIn().signOut();
     await _auth.signOut();
+    try {
+      await GoogleSignIn().signOut();
+    } catch (_) {
+      // Ignore Google sign out failures.
+    }
+    try {
+      await Supabase.instance.client.auth.signOut();
+    } catch (_) {
+      // Ignore Supabase sign out failures.
+    }
   }
 
   // ── Password Reset ───────────────────────────────────────────
   Future<void> sendPasswordResetEmail(String email) async {
-    await _auth.sendPasswordResetEmail(email: email);
+    await _auth.sendPasswordResetEmail(email: email.trim());
   }
 }

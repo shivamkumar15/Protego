@@ -1,17 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' hide User;
+import 'auth_gate.dart';
 import 'firebase_options.dart';
 import 'theme_mode_scope.dart';
-import 'screens/signup_screen.dart';
-import 'screens/home_screen.dart';
-import 'screens/emergency_contacts_setup_screen.dart';
-import 'screens/verify_email_screen.dart';
-import 'services/emergency_contacts_service.dart';
+import 'screens/app_permissions_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Supabase.initialize(
+    url: 'https://ilwxanuvttrhxkgmaphq.supabase.co',
+    anonKey: 'sb_publishable_NL5o0d8iVuxi3yUXcZJ6rQ_mOvr9JqQ',
+  );
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
@@ -27,14 +28,35 @@ class ProtegoApp extends StatefulWidget {
 
 class _ProtegoAppState extends State<ProtegoApp> {
   static const _themeModePrefsKey = 'theme_mode';
+  bool _permissionsReady = false;
   final ValueNotifier<ThemeMode> _themeMode =
       ValueNotifier<ThemeMode>(ThemeMode.system);
 
   @override
   void initState() {
     super.initState();
-    _loadSavedThemeMode();
+    _loadStartupState();
     _themeMode.addListener(_persistThemeMode);
+  }
+
+  Future<void> _loadStartupState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedValue = prefs.getString(_themeModePrefsKey);
+    final permissionsReady =
+        prefs.getBool(AppPermissionsScreen.permissionsPrefsKey) ?? false;
+    final savedMode =
+        savedValue == null ? null : _themeModeFromString(savedValue);
+
+    if (!mounted) {
+      return;
+    }
+
+    if (savedMode != null) {
+      _themeMode.value = savedMode;
+    }
+    setState(() {
+      _permissionsReady = permissionsReady;
+    });
   }
 
   @override
@@ -42,17 +64,6 @@ class _ProtegoAppState extends State<ProtegoApp> {
     _themeMode.removeListener(_persistThemeMode);
     _themeMode.dispose();
     super.dispose();
-  }
-
-  Future<void> _loadSavedThemeMode() async {
-    final prefs = await SharedPreferences.getInstance();
-    final savedValue = prefs.getString(_themeModePrefsKey);
-    if (savedValue == null) return;
-
-    final savedMode = _themeModeFromString(savedValue);
-    if (savedMode != null) {
-      _themeMode.value = savedMode;
-    }
   }
 
   Future<void> _persistThemeMode() async {
@@ -106,7 +117,7 @@ class _ProtegoAppState extends State<ProtegoApp> {
           borderSide: const BorderSide(color: primary, width: 1.4),
         ),
       ),
-      fontFamily: 'Inter',
+      fontFamily: 'Poppins',
     );
   }
 
@@ -143,7 +154,7 @@ class _ProtegoAppState extends State<ProtegoApp> {
           borderSide: const BorderSide(color: primary, width: 1.4),
         ),
       ),
-      fontFamily: 'Inter',
+      fontFamily: 'Poppins',
     );
   }
 
@@ -160,60 +171,21 @@ class _ProtegoAppState extends State<ProtegoApp> {
             themeMode: mode,
             theme: _buildLightTheme(),
             darkTheme: _buildDarkTheme(),
-            home: const AuthGate(),
+            home: _permissionsReady
+                ? const AuthGate()
+                : AppPermissionsScreen(
+                    onCompleted: () {
+                      if (!mounted) {
+                        return;
+                      }
+                      setState(() {
+                        _permissionsReady = true;
+                      });
+                    },
+                  ),
           );
         },
       ),
-    );
-  }
-}
-
-class AuthGate extends StatelessWidget {
-  const AuthGate({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.userChanges(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return Scaffold(
-            body: Center(
-              child: CircularProgressIndicator(
-                color: Theme.of(context).colorScheme.primary,
-              ),
-            ),
-          );
-        }
-        if (snapshot.hasData) {
-          final user = snapshot.data!;
-          final isAllowedSession =
-              user.phoneNumber != null || user.emailVerified;
-          if (isAllowedSession) {
-            return FutureBuilder<bool>(
-              future: EmergencyContactsService().shouldShowOnboarding(),
-              builder: (context, onboardingSnapshot) {
-                if (onboardingSnapshot.connectionState ==
-                    ConnectionState.waiting) {
-                  return Scaffold(
-                    body: Center(
-                      child: CircularProgressIndicator(
-                        color: Theme.of(context).colorScheme.primary,
-                      ),
-                    ),
-                  );
-                }
-                if (onboardingSnapshot.data ?? false) {
-                  return const EmergencyContactsSetupScreen();
-                }
-                return const HomeScreen();
-              },
-            );
-          }
-          return const VerifyEmailScreen();
-        }
-        return const SignUpScreen();
-      },
     );
   }
 }

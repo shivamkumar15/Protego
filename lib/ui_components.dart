@@ -6,9 +6,11 @@ Widget buildTextField({
   required String hint,
   required TextEditingController controller,
   bool obscure = false,
+  bool readOnly = false,
   TextInputType keyboardType = TextInputType.text,
   Widget? suffixIcon,
   Widget? prefixIcon,
+  ValueChanged<String>? onChanged,
   String? Function(String?)? validator,
 }) {
   return _AnimatedAuthTextField(
@@ -16,9 +18,11 @@ Widget buildTextField({
     hint: hint,
     controller: controller,
     obscure: obscure,
+    readOnly: readOnly,
     keyboardType: keyboardType,
     suffixIcon: suffixIcon,
     prefixIcon: prefixIcon,
+    onChanged: onChanged,
     validator: validator,
   );
 }
@@ -29,9 +33,11 @@ class _AnimatedAuthTextField extends StatefulWidget {
     required this.hint,
     required this.controller,
     required this.obscure,
+    required this.readOnly,
     required this.keyboardType,
     required this.suffixIcon,
     this.prefixIcon,
+    this.onChanged,
     required this.validator,
   });
 
@@ -39,9 +45,11 @@ class _AnimatedAuthTextField extends StatefulWidget {
   final String hint;
   final TextEditingController controller;
   final bool obscure;
+  final bool readOnly;
   final TextInputType keyboardType;
   final Widget? suffixIcon;
   final Widget? prefixIcon;
+  final ValueChanged<String>? onChanged;
   final String? Function(String?)? validator;
 
   @override
@@ -96,7 +104,9 @@ class _AnimatedAuthTextFieldState extends State<_AnimatedAuthTextField> {
           focusNode: _focusNode,
           controller: widget.controller,
           obscureText: widget.obscure,
+          readOnly: widget.readOnly,
           keyboardType: widget.keyboardType,
+          onChanged: widget.onChanged,
           validator: widget.validator,
           style: TextStyle(
             color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF111827),

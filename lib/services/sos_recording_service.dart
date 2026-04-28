@@ -1,6 +1,8 @@
 import 'dart:io';
 
+import 'package:camera/camera.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -48,6 +50,29 @@ class SosRecording {
   }
 }
 
+class SosVideoRecording {
+  const SosVideoRecording({
+    this.id,
+    required this.userId,
+    required this.filePath,
+    required this.createdAt,
+  });
+
+  final int? id;
+  final String userId;
+  final String filePath;
+  final DateTime createdAt;
+
+  factory SosVideoRecording.fromMap(Map<String, Object?> map) {
+    return SosVideoRecording(
+      id: map['id'] as int?,
+      userId: map['user_id'] as String,
+      filePath: map['file_path'] as String,
+      createdAt: DateTime.parse(map['created_at'] as String),
+    );
+  }
+}
+
 class SosRecordingService {
   SosRecordingService._();
 
@@ -56,11 +81,16 @@ class SosRecordingService {
 
   static const _dbName = 'protego_sos.db';
   static const _table = 'sos_recordings';
+  static const _videoTable = 'sos_videos';
 
   final AudioRecorder _recorder = AudioRecorder();
+  final ImagePicker _imagePicker = ImagePicker();
+  CameraController? _cameraController;
   Database? _database;
   int? _activeRecordingId;
   String? _activeRecordingPath;
+  bool _videoRecordingActive = false;
+  DateTime? _videoStartedAt;
 
   Future<Database> get database async {
     if (_database != null) {
@@ -70,25 +100,51 @@ class SosRecordingService {
     final dbPath = await getDatabasesPath();
     _database = await openDatabase(
       path.join(dbPath, _dbName),
-      version: 1,
+      version: 2,
       onCreate: (db, version) async {
-        await db.execute('''
-          CREATE TABLE $_table (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            started_at TEXT NOT NULL,
-            stopped_at TEXT,
-            is_active INTEGER NOT NULL DEFAULT 1
-          )
-        ''');
+        await _createTables(db);
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS $_videoTable (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id TEXT NOT NULL,
+              file_path TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            )
+          ''');
+        }
       },
     );
 
     return _database!;
   }
 
+  Future<void> _createTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE $_table (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        stopped_at TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE $_videoTable (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    ''');
+  }
+
   bool get isRecordingActive => _activeRecordingId != null;
+  bool get isVideoRecordingActive => _videoRecordingActive;
 
   String get _currentUserId {
     final user = FirebaseAuth.instance.currentUser;
@@ -193,7 +249,99 @@ class SosRecordingService {
     );
   }
 
+  Future<List<SosVideoRecording>> getVideoRecordings() async {
+    final db = await database;
+    final rows = await db.query(
+      _videoTable,
+      where: 'user_id = ?',
+      whereArgs: [_currentUserId],
+      orderBy: 'created_at DESC',
+    );
+    return rows.map(SosVideoRecording.fromMap).toList();
+  }
+
+  Future<void> deleteVideoRecording(int id) async {
+    final db = await database;
+    await db.delete(
+      _videoTable,
+      where: 'id = ? AND user_id = ?',
+      whereArgs: [id, _currentUserId],
+    );
+  }
+
+  Future<String?> captureAndSaveSosVideo() async {
+    final capture = await _imagePicker.pickVideo(
+      source: ImageSource.camera,
+      preferredCameraDevice: CameraDevice.rear,
+      maxDuration: const Duration(minutes: 2),
+    );
+
+    if (capture == null) {
+      return null;
+    }
+
+    final db = await database;
+    await db.insert(_videoTable, {
+      'user_id': _currentUserId,
+      'file_path': capture.path,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+
+    return capture.path;
+  }
+
+  Future<void> startAutoVideoRecording() async {
+    if (_videoRecordingActive) {
+      return;
+    }
+
+    final cameras = await availableCameras();
+    final selectedCamera = cameras.firstWhere(
+      (camera) => camera.lensDirection == CameraLensDirection.back,
+      orElse: () => cameras.first,
+    );
+
+    final controller = CameraController(
+      selectedCamera,
+      ResolutionPreset.medium,
+      enableAudio: true,
+    );
+
+    await controller.initialize();
+    await controller.prepareForVideoRecording();
+    await controller.startVideoRecording();
+
+    _cameraController?.dispose();
+    _cameraController = controller;
+    _videoRecordingActive = true;
+    _videoStartedAt = DateTime.now();
+  }
+
+  Future<String?> stopAutoVideoRecording() async {
+    if (!_videoRecordingActive || _cameraController == null) {
+      return null;
+    }
+
+    final recordedFile = await _cameraController!.stopVideoRecording();
+    final pathValue = recordedFile.path;
+    final db = await database;
+    await db.insert(_videoTable, {
+      'user_id': _currentUserId,
+      'file_path': pathValue,
+      'created_at': (_videoStartedAt ?? DateTime.now()).toIso8601String(),
+    });
+
+    await _cameraController!.dispose();
+    _cameraController = null;
+    _videoRecordingActive = false;
+    _videoStartedAt = null;
+    return pathValue;
+  }
+
   Future<void> disposeRecorder() async {
     await _recorder.dispose();
+    await _cameraController?.dispose();
+    _cameraController = null;
+    _videoRecordingActive = false;
   }
 }

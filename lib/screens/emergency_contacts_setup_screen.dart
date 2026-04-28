@@ -52,7 +52,7 @@ class _EmergencyContactsSetupScreenState
     await _service.markOnboardingSkipped(true);
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const HomeScreen(initialIndex: 2)),
+      MaterialPageRoute(builder: (_) => const HomeScreen()),
     );
   }
 
@@ -98,117 +98,36 @@ class _EmergencyContactsSetupScreenState
               child: ListView(
                 padding: const EdgeInsets.all(20),
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.surface,
-                      borderRadius: BorderRadius.circular(24),
-                      border: Border.all(
-                        color: isDark
-                            ? const Color(0xFF2A2A2A)
-                            : const Color(0xFFE5E7EB),
-                      ),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Container(
-                          width: 56,
-                          height: 56,
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.primary
-                                .withValues(alpha: 0.14),
-                            borderRadius: BorderRadius.circular(18),
-                          ),
-                          child: Icon(
-                            Icons.contact_phone_outlined,
-                            color: theme.colorScheme.primary,
-                            size: 28,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          'Set up your emergency contacts',
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Add emergency contacts',
                           style: TextStyle(
                             fontSize: 24,
                             fontWeight: FontWeight.bold,
                             color: theme.colorScheme.onSurface,
                           ),
                         ),
-                        const SizedBox(height: 8),
-                        Text(
-                          'Add the people you want to reach quickly during emergencies. You can also do this later.',
-                          style: TextStyle(
-                            color: isDark
-                                ? const Color(0xFFA3A3A3)
-                                : const Color(0xFF6B7280),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.primary.withValues(alpha: 0.08),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                _contacts.isEmpty
-                                    ? 'Start with your most trusted person'
-                                    : 'Add another trusted contact',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                  color: theme.colorScheme.onSurface,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                'You can mark one person as primary for faster access.',
-                                style: TextStyle(
-                                  color: isDark
-                                      ? const Color(0xFFA3A3A3)
-                                      : const Color(0xFF6B7280),
-                                  fontSize: 13,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        FilledButton.icon(
-                          onPressed: () => _openContactSheet(),
-                          icon: const Icon(Icons.add),
-                          label: const Text('Add'),
-                        ),
-                      ],
-                    ),
+                      ),
+                      FilledButton.icon(
+                        onPressed: () => _openContactSheet(),
+                        icon: const Icon(Icons.add),
+                        label: const Text('Add'),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 16),
                   if (_contacts.isEmpty)
-                    Container(
-                      padding: const EdgeInsets.all(18),
-                      decoration: BoxDecoration(
-                        color: theme.colorScheme.surface,
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(
-                          color: isDark
-                              ? const Color(0xFF2A2A2A)
-                              : const Color(0xFFE5E7EB),
-                        ),
-                      ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
                       child: Text(
-                        'No emergency contacts added yet. Tap Add to save the first person you trust.',
+                        'No emergency contacts added yet.',
                         style: TextStyle(
-                          color: theme.colorScheme.onSurface,
-                          fontWeight: FontWeight.w600,
+                          color: isDark
+                              ? const Color(0xFFA3A3A3)
+                              : const Color(0xFF6B7280),
+                          fontWeight: FontWeight.w500,
                         ),
                       ),
                     )
@@ -267,7 +186,7 @@ class _EmergencyContactCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
+        color: isDark ? const Color(0xFF111111) : theme.colorScheme.surface,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: isDark ? const Color(0xFF2A2A2A) : const Color(0xFFE5E7EB),
@@ -323,27 +242,43 @@ class _EmergencyContactCard extends StatelessWidget {
           const SizedBox(height: 14),
           Row(
             children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: onCall,
-                  icon: const Icon(Icons.call_outlined),
-                  label: const Text('Call'),
-                ),
+              FilledButton.icon(
+                onPressed: onCall,
+                icon: const Icon(Icons.call_outlined),
+                label: const Text('Call'),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: onEdit,
-                  icon: const Icon(Icons.edit_outlined),
-                  label: const Text('Edit'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: onDelete,
-                  icon: const Icon(Icons.delete_outline),
-                  label: const Text('Delete'),
+              const Spacer(),
+              PopupMenuButton<String>(
+                onSelected: (value) {
+                  if (value == 'edit') {
+                    onEdit();
+                  } else if (value == 'delete') {
+                    onDelete();
+                  }
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem<String>(
+                    value: 'edit',
+                    child: Text('Edit'),
+                  ),
+                  PopupMenuItem<String>(
+                    value: 'delete',
+                    child: Text('Delete'),
+                  ),
+                ],
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? const Color(0xFF1A1A1A)
+                        : const Color(0xFFF3F4F6),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    Icons.more_vert,
+                    color: theme.colorScheme.onSurface,
+                    size: 20,
+                  ),
                 ),
               ),
             ],

@@ -1,7 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sqflite/sqflite.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class EmergencyContact {
   const EmergencyContact({
@@ -9,6 +8,8 @@ class EmergencyContact {
     required this.userId,
     required this.name,
     required this.phoneNumber,
+    this.username,
+    this.profilePhotoPath,
     required this.isPrimary,
   });
 
@@ -16,6 +17,8 @@ class EmergencyContact {
   final String userId;
   final String name;
   final String phoneNumber;
+  final String? username;
+  final String? profilePhotoPath;
   final bool isPrimary;
 
   Map<String, Object?> toMap() {
@@ -24,7 +27,9 @@ class EmergencyContact {
       'user_id': userId,
       'name': name,
       'phone_number': phoneNumber,
-      'is_primary': isPrimary ? 1 : 0,
+      'username': username,
+      'profile_photo_path': profilePhotoPath,
+      'is_primary': isPrimary,
     };
   }
 
@@ -33,6 +38,8 @@ class EmergencyContact {
     String? userId,
     String? name,
     String? phoneNumber,
+    String? username,
+    String? profilePhotoPath,
     bool? isPrimary,
   }) {
     return EmergencyContact(
@@ -40,17 +47,22 @@ class EmergencyContact {
       userId: userId ?? this.userId,
       name: name ?? this.name,
       phoneNumber: phoneNumber ?? this.phoneNumber,
+      username: username ?? this.username,
+      profilePhotoPath: profilePhotoPath ?? this.profilePhotoPath,
       isPrimary: isPrimary ?? this.isPrimary,
     );
   }
 
-  factory EmergencyContact.fromMap(Map<String, Object?> map) {
+  factory EmergencyContact.fromMap(Map<String, dynamic> map) {
+    final rawId = map['id'];
     return EmergencyContact(
-      id: map['id'] as int?,
-      userId: map['user_id'] as String,
-      name: map['name'] as String,
-      phoneNumber: map['phone_number'] as String,
-      isPrimary: (map['is_primary'] as int? ?? 0) == 1,
+      id: rawId is int ? rawId : int.tryParse((rawId ?? '').toString()),
+      userId: (map['user_id'] ?? '').toString(),
+      name: (map['name'] ?? '').toString(),
+      phoneNumber: (map['phone_number'] ?? '').toString(),
+      username: map['username'] as String?,
+      profilePhotoPath: map['profile_photo_path'] as String?,
+      isPrimary: map['is_primary'] == true || map['is_primary'] == 1,
     );
   }
 }
@@ -61,31 +73,9 @@ class EmergencyContactsService {
       EmergencyContactsService._();
   factory EmergencyContactsService() => _instance;
 
-  static const _dbName = 'protego_contacts.db';
   static const _table = 'emergency_contacts';
   static const _skipKeyPrefix = 'emergency_contacts_setup_skipped_';
-  Database? _database;
-
-  Future<Database> get database async {
-    if (_database != null) return _database!;
-    final dbPath = await getDatabasesPath();
-    _database = await openDatabase(
-      path.join(dbPath, _dbName),
-      version: 1,
-      onCreate: (db, version) async {
-        await db.execute('''
-          CREATE TABLE $_table (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            phone_number TEXT NOT NULL,
-            is_primary INTEGER NOT NULL DEFAULT 0
-          )
-        ''');
-      },
-    );
-    return _database!;
-  }
+  final SupabaseClient _supabase = Supabase.instance.client;
 
   String get _currentUserId {
     final user = FirebaseAuth.instance.currentUser;
@@ -96,14 +86,31 @@ class EmergencyContactsService {
   }
 
   Future<List<EmergencyContact>> getContacts() async {
-    final db = await database;
-    final rows = await db.query(
-      _table,
-      where: 'user_id = ?',
-      whereArgs: [_currentUserId],
-      orderBy: 'is_primary DESC, id ASC',
-    );
-    return rows.map(EmergencyContact.fromMap).toList();
+    try {
+      final rows = await _supabase
+          .from(_table)
+          .select()
+          .eq('user_id', _currentUserId)
+          .order('is_primary', ascending: false)
+          .order('id', ascending: true);
+
+      return rows
+          .whereType<Map<String, dynamic>>()
+          .map(EmergencyContact.fromMap)
+          .toList();
+    } catch (_) {
+      final rows = await _supabase
+          .from(_table)
+          .select()
+          .eq('user_id', _currentUserId)
+          .order('is_primary', ascending: false)
+          .order('name', ascending: true);
+
+      return rows
+          .whereType<Map<String, dynamic>>()
+          .map(EmergencyContact.fromMap)
+          .toList();
+    }
   }
 
   Future<bool> hasContacts() async {
@@ -112,82 +119,47 @@ class EmergencyContactsService {
   }
 
   Future<void> saveContact(EmergencyContact contact) async {
-    final db = await database;
     final userId = _currentUserId;
+    final data = contact.copyWith(userId: userId).toMap()..remove('id');
 
-    await db.transaction((txn) async {
-      if (contact.isPrimary) {
-        await txn.update(
-          _table,
-          {'is_primary': 0},
-          where: 'user_id = ?',
-          whereArgs: [userId],
-        );
-      }
-
-      final existingContacts = await txn.query(
-        _table,
-        where: 'user_id = ?',
-        whereArgs: [userId],
-      );
-      final shouldBePrimary = contact.isPrimary || existingContacts.isEmpty;
-      final data = contact
-          .copyWith(
-            userId: userId,
-            isPrimary: shouldBePrimary,
-          )
-          .toMap()
-        ..remove('id');
-
+    try {
       if (contact.id == null) {
-        await txn.insert(_table, data);
+        await _supabase.from(_table).insert(data);
       } else {
-        await txn.update(
-          _table,
-          data,
-          where: 'id = ? AND user_id = ?',
-          whereArgs: [contact.id, userId],
+        await _supabase
+            .from(_table)
+            .update(data)
+            .eq('id', contact.id as Object)
+            .eq('user_id', userId);
+      }
+    } on PostgrestException catch (e) {
+      final message = (e.message).toLowerCase();
+      final isPermissionIssue =
+          e.code == '42501' || message.contains('permission');
+      if (isPermissionIssue) {
+        throw StateError(
+          'Emergency contacts save failed: Supabase RLS policy blocked write. '
+          'Apply the latest `supabase_emergency_contacts_schema.sql` policies.',
         );
       }
-    });
+      throw StateError('Emergency contacts save failed: ${e.message}');
+    }
 
     await markOnboardingSkipped(false);
   }
 
   Future<void> deleteContact(int id) async {
-    final db = await database;
-    final userId = _currentUserId;
-    await db.transaction((txn) async {
-      await txn.delete(
-        _table,
-        where: 'id = ? AND user_id = ?',
-        whereArgs: [id, userId],
-      );
-
-      final remaining = await txn.query(
-        _table,
-        where: 'user_id = ?',
-        whereArgs: [userId],
-        orderBy: 'id ASC',
-        limit: 1,
-      );
-      if (remaining.isNotEmpty) {
-        final firstId = remaining.first['id'] as int;
-        final isPrimary = (remaining.first['is_primary'] as int? ?? 0) == 1;
-        if (!isPrimary) {
-          await txn.update(
-            _table,
-            {'is_primary': 1},
-            where: 'id = ?',
-            whereArgs: [firstId],
-          );
-        }
-      }
-    });
+    await _supabase
+        .from(_table)
+        .delete()
+        .eq('id', id)
+        .eq('user_id', _currentUserId);
   }
 
   Future<bool> shouldShowOnboarding() async {
-    if (await hasContacts()) return false;
+    if (await hasContacts()) {
+      return false;
+    }
     final prefs = await SharedPreferences.getInstance();
     return !(prefs.getBool('$_skipKeyPrefix$_currentUserId') ?? false);
   }

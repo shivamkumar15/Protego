@@ -1,19 +1,27 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart' as latlng;
+import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/auth_service.dart';
 import '../services/emergency_contacts_service.dart';
 import '../services/sos_recording_service.dart';
+import '../services/username_service.dart';
 import '../theme_mode_scope.dart';
+import '../auth_gate.dart';
 import 'emergency_contact_editor_sheet.dart';
 import 'sos_recordings_screen.dart';
 
@@ -27,43 +35,49 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  static const _autoVideoRecordKey = 'sos_auto_video_record';
+  static const _autoVoiceRecordKey = 'sos_auto_voice_record';
+  static const _sosHoldDurationKey = 'sos_hold_duration';
+  static const _vibrationOnSosKey = 'sos_vibration_on_trigger';
+
   late int _currentIndex;
   final SosRecordingService _sosRecordingService = SosRecordingService();
   bool _isSosActive = false;
   String? _activeSosRecordingPath;
+  String? _activeSosVideoPath;
+  bool _autoVideoRecord = false;
+  bool _autoVoiceRecord = true;
+  bool _vibrationOnSos = true;
+  int _sosHoldDuration = 2;
+  String? _navProfilePhotoPath;
+  DateTime? _lastBackPressedAt;
 
   static const _titles = <String>[
     'Home',
     'Live Map',
-    'Emergency Contacts',
     'Profile',
     'Settings',
   ];
 
   static const _navItems = <_BottomNavItem>[
     _BottomNavItem(
-      icon: Icons.home_outlined,
-      activeIcon: Icons.home,
+      icon: Icons.house_outlined,
+      activeIcon: Icons.house_rounded,
       label: 'Home',
     ),
     _BottomNavItem(
-      icon: Icons.map_outlined,
-      activeIcon: Icons.map,
+      icon: Icons.explore_outlined,
+      activeIcon: Icons.explore_rounded,
       label: 'Live Map',
     ),
     _BottomNavItem(
-      icon: Icons.contact_phone_outlined,
-      activeIcon: Icons.contact_phone,
-      label: 'Contacts',
-    ),
-    _BottomNavItem(
-      icon: Icons.person_outline,
-      activeIcon: Icons.person,
+      icon: Icons.account_circle_outlined,
+      activeIcon: Icons.account_circle,
       label: 'Profile',
     ),
     _BottomNavItem(
-      icon: Icons.settings_outlined,
-      activeIcon: Icons.settings,
+      icon: Icons.tune_outlined,
+      activeIcon: Icons.tune_rounded,
       label: 'Settings',
     ),
   ];
@@ -72,22 +86,91 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _currentIndex = widget.initialIndex;
+    _loadSosPreferences();
+    _loadNavProfilePhoto();
+  }
+
+  Future<void> _loadNavProfilePhoto() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      return;
+    }
+    final remoteProfile =
+        await UsernameService().getPublicProfileForUserId(uid);
+    final prefs = await SharedPreferences.getInstance();
+    final path = (remoteProfile?.profilePhotoPath ??
+            prefs.getString('profile_photo_$uid') ??
+            '')
+        .trim();
+    if (path.isNotEmpty) {
+      await prefs.setString('profile_photo_$uid', path);
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _navProfilePhotoPath = path.isEmpty ? null : path;
+    });
+  }
+
+  Future<void> _loadSosPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _autoVideoRecord = prefs.getBool(_autoVideoRecordKey) ?? false;
+      _autoVoiceRecord = prefs.getBool(_autoVoiceRecordKey) ?? true;
+      _vibrationOnSos = prefs.getBool(_vibrationOnSosKey) ?? true;
+      final hold = prefs.getInt(_sosHoldDurationKey) ?? 2;
+      _sosHoldDuration = <int>{2, 5, 7}.contains(hold) ? hold : 2;
+    });
+  }
+
+  Future<void> _saveBoolPreference(String key, bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(key, value);
+  }
+
+  Future<void> _saveIntPreference(String key, int value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(key, value);
   }
 
   Future<void> _handleSosActivated() async {
     try {
-      final recordingPath = await _sosRecordingService.startRecording();
+      String? recordingPath;
+      String? videoPath;
+      if (_vibrationOnSos) {
+        HapticFeedback.heavyImpact();
+      }
+
+      if (_autoVoiceRecord) {
+        recordingPath = await _sosRecordingService.startRecording();
+      }
+
+      if (_autoVideoRecord) {
+        try {
+          await _sosRecordingService.startAutoVideoRecording();
+          videoPath = 'Background video recording active';
+        } catch (_) {
+          videoPath = null;
+        }
+      }
+
       if (!mounted) {
         return;
       }
       setState(() {
         _isSosActive = true;
         _activeSosRecordingPath = recordingPath;
-        _currentIndex = 1;
+        _activeSosVideoPath = videoPath;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Help is on the way. SOS recording started.'),
+        SnackBar(
+          content: Text(
+            (_autoVoiceRecord || _autoVideoRecord)
+                ? 'Help is on the way. SOS recording started.'
+                : 'Help is on the way. SOS activated.',
+          ),
           backgroundColor: Colors.red,
         ),
       );
@@ -105,24 +188,72 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _stopSos() async {
-    final recordingPath = await _sosRecordingService.stopRecording();
+    final recordingPath =
+        _autoVoiceRecord ? await _sosRecordingService.stopRecording() : null;
+    String? videoPath;
+    if (_autoVideoRecord) {
+      try {
+        videoPath = await _sosRecordingService.stopAutoVideoRecording();
+      } catch (_) {
+        videoPath = null;
+      }
+    }
     final savedPath = recordingPath ?? _activeSosRecordingPath;
+    final savedVideo = videoPath ?? _activeSosVideoPath;
     if (!mounted) {
       return;
     }
     setState(() {
       _isSosActive = false;
       _activeSosRecordingPath = savedPath;
+      _activeSosVideoPath = savedVideo;
     });
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          savedPath == null
-              ? 'SOS stopped. Recording ended.'
-              : 'SOS stopped. Recording saved to $savedPath',
+          _buildStopSosMessage(savedPath, savedVideo),
         ),
       ),
     );
+  }
+
+  String _buildStopSosMessage(String? audioPath, String? videoPath) {
+    if (audioPath == null && videoPath == null) {
+      return 'SOS stopped. Recording ended.';
+    }
+    if (audioPath != null && videoPath != null) {
+      return 'SOS stopped. Audio and video saved.';
+    }
+    if (audioPath != null) {
+      return 'SOS stopped. Audio saved to $audioPath';
+    }
+    return 'SOS stopped. Video saved to $videoPath';
+  }
+
+  void _handleBackNavigation() {
+    if (_currentIndex != 0) {
+      setState(() {
+        _currentIndex = 0;
+      });
+      return;
+    }
+
+    final now = DateTime.now();
+    final lastPressed = _lastBackPressedAt;
+    if (lastPressed == null ||
+        now.difference(lastPressed) > const Duration(seconds: 2)) {
+      _lastBackPressedAt = now;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Press back again to exit'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    SystemNavigator.pop();
   }
 
   @override
@@ -133,80 +264,120 @@ class _HomeScreenState extends State<HomeScreen> {
     final authService = AuthService();
     final themeModeController = ThemeModeScope.of(context);
 
-    return Scaffold(
-      backgroundColor: isDark ? Colors.black : const Color(0xFFF8FAFC),
-      appBar: AppBar(
-        backgroundColor: theme.colorScheme.surface,
-        elevation: 0,
-        title: Text(
-          _titles[_currentIndex],
-          style: TextStyle(
-            color: theme.colorScheme.onSurface,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        actions: [
-          if (_currentIndex == 4)
-            PopupMenuButton<ThemeMode>(
-              tooltip: 'Theme mode',
-              icon: Icon(Icons.palette_outlined,
-                  color: theme.colorScheme.onSurface),
-              onSelected: (mode) => themeModeController.value = mode,
-              itemBuilder: (context) => [
-                const PopupMenuItem<ThemeMode>(
-                  value: ThemeMode.system,
-                  child: Text('System'),
-                ),
-                const PopupMenuItem<ThemeMode>(
-                  value: ThemeMode.light,
-                  child: Text('Light'),
-                ),
-                const PopupMenuItem<ThemeMode>(
-                  value: ThemeMode.dark,
-                  child: Text('Dark'),
-                ),
-              ],
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) {
+          return;
+        }
+        _handleBackNavigation();
+      },
+      child: Scaffold(
+        backgroundColor: isDark ? Colors.black : const Color(0xFFF8FAFC),
+        appBar: AppBar(
+          backgroundColor: theme.colorScheme.surface,
+          elevation: 0,
+          title: Text(
+            _titles[_currentIndex],
+            style: TextStyle(
+              color: theme.colorScheme.onSurface,
+              fontWeight: FontWeight.bold,
             ),
-          IconButton(
-            icon: Icon(Icons.logout, color: theme.colorScheme.onSurface),
-            onPressed: authService.signOut,
           ),
-        ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(1),
-          child: Container(
-            color: isDark ? const Color(0xFF2A2A2A) : const Color(0xFFE5E7EB),
-            height: 1,
+          actions: [
+            if (_currentIndex == 3)
+              PopupMenuButton<ThemeMode>(
+                tooltip: 'Theme mode',
+                icon: Icon(Icons.palette_outlined,
+                    color: theme.colorScheme.onSurface),
+                onSelected: (mode) => themeModeController.value = mode,
+                itemBuilder: (context) => [
+                  const PopupMenuItem<ThemeMode>(
+                    value: ThemeMode.system,
+                    child: Text('System'),
+                  ),
+                  const PopupMenuItem<ThemeMode>(
+                    value: ThemeMode.light,
+                    child: Text('Light'),
+                  ),
+                  const PopupMenuItem<ThemeMode>(
+                    value: ThemeMode.dark,
+                    child: Text('Dark'),
+                  ),
+                ],
+              ),
+          ],
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(1),
+            child: Container(
+              color: isDark ? const Color(0xFF2A2A2A) : const Color(0xFFE5E7EB),
+              height: 1,
+            ),
           ),
         ),
-      ),
-      body: IndexedStack(
-        index: _currentIndex,
-        children: [
-          _HomeTab(
-            user: user,
-            isSosActive: _isSosActive,
-            onSosActivated: _handleSosActivated,
-            onStopSos: _stopSos,
+        body: IndexedStack(
+          index: _currentIndex,
+          children: [
+            _HomeTab(
+              user: user,
+              isSosActive: _isSosActive,
+              onSosActivated: _handleSosActivated,
+              onStopSos: _stopSos,
+              holdDuration: _sosHoldDuration,
+            ),
+            _LiveMapTab(
+              isSosActive: _isSosActive,
+              onStopSos: _stopSos,
+            ),
+            _ProfileTab(
+              user: user,
+              onProfilePhotoChanged: (path) {
+                setState(() {
+                  _navProfilePhotoPath = path;
+                });
+              },
+            ),
+            _SettingsTab(
+              user: user,
+              themeModeController: themeModeController,
+              onOpenEmergencyContacts: () {
+                setState(() => _currentIndex = 2);
+              },
+              onLogout: authService.signOut,
+              autoVideoRecord: _autoVideoRecord,
+              autoVoiceRecord: _autoVoiceRecord,
+              vibrationOnSos: _vibrationOnSos,
+              holdDuration: _sosHoldDuration,
+              onAutoVideoRecordChanged: (value) {
+                setState(() => _autoVideoRecord = value);
+                _saveBoolPreference(_autoVideoRecordKey, value);
+              },
+              onAutoVoiceRecordChanged: (value) {
+                setState(() => _autoVoiceRecord = value);
+                _saveBoolPreference(_autoVoiceRecordKey, value);
+              },
+              onVibrationOnSosChanged: (value) {
+                setState(() => _vibrationOnSos = value);
+                _saveBoolPreference(_vibrationOnSosKey, value);
+              },
+              onHoldDurationChanged: (value) {
+                setState(() => _sosHoldDuration = value);
+                _saveIntPreference(_sosHoldDurationKey, value);
+              },
+            ),
+          ],
+        ),
+        bottomNavigationBar: SafeArea(
+          minimum: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          child: _AnimatedBottomNavBar(
+            items: _navItems,
+            currentIndex: _currentIndex,
+            profileImagePath: _navProfilePhotoPath,
+            onTap: (index) {
+              if (_currentIndex == index) return;
+              setState(() => _currentIndex = index);
+            },
           ),
-          _LiveMapTab(
-            isSosActive: _isSosActive,
-            onStopSos: _stopSos,
-          ),
-          const _EmergencyContactsTab(),
-          _ProfileTab(user: user),
-          _SettingsTab(themeModeController: themeModeController),
-        ],
-      ),
-      bottomNavigationBar: SafeArea(
-        minimum: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-        child: _AnimatedBottomNavBar(
-          items: _navItems,
-          currentIndex: _currentIndex,
-          onTap: (index) {
-            if (_currentIndex == index) return;
-            setState(() => _currentIndex = index);
-          },
         ),
       ),
     );
@@ -229,11 +400,13 @@ class _AnimatedBottomNavBar extends StatefulWidget {
   const _AnimatedBottomNavBar({
     required this.items,
     required this.currentIndex,
+    required this.profileImagePath,
     required this.onTap,
   });
 
   final List<_BottomNavItem> items;
   final int currentIndex;
+  final String? profileImagePath;
   final ValueChanged<int> onTap;
 
   @override
@@ -346,12 +519,12 @@ class _AnimatedBottomNavBarState extends State<_AnimatedBottomNavBar>
                                           const Duration(milliseconds: 400),
                                       curve: Curves.easeOutBack,
                                       scale: selected ? 1.15 : 1,
-                                      child: Icon(
-                                        selected ? item.activeIcon : item.icon,
-                                        color: selected
-                                            ? theme.colorScheme.primary
-                                            : iconColor,
-                                        size: selected ? 28 : 26,
+                                      child: _buildNavIcon(
+                                        index: index,
+                                        item: item,
+                                        selected: selected,
+                                        theme: theme,
+                                        iconColor: iconColor,
                                       ),
                                     ),
                                   ),
@@ -392,6 +565,60 @@ class _AnimatedBottomNavBarState extends State<_AnimatedBottomNavBar>
         );
       },
     );
+  }
+
+  Widget _buildNavIcon({
+    required int index,
+    required _BottomNavItem item,
+    required bool selected,
+    required ThemeData theme,
+    required Color iconColor,
+  }) {
+    if (index != 2) {
+      return Icon(
+        selected ? item.activeIcon : item.icon,
+        color: selected ? theme.colorScheme.primary : iconColor,
+        size: selected ? 28 : 26,
+      );
+    }
+
+    final provider = _profileImageProvider(widget.profileImagePath);
+    if (provider == null) {
+      return Icon(
+        selected ? item.activeIcon : item.icon,
+        color: selected ? theme.colorScheme.primary : iconColor,
+        size: selected ? 28 : 26,
+      );
+    }
+
+    return Container(
+      width: selected ? 30 : 27,
+      height: selected ? 30 : 27,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(
+          color: selected ? theme.colorScheme.primary : iconColor,
+          width: selected ? 2 : 1.5,
+        ),
+        image: DecorationImage(image: provider, fit: BoxFit.cover),
+      ),
+    );
+  }
+
+  ImageProvider<Object>? _profileImageProvider(String? value) {
+    final path = (value ?? '').trim();
+    if (path.isEmpty) {
+      return null;
+    }
+    final normalized = path.toLowerCase();
+    if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+      return NetworkImage(path);
+    }
+    final file = File(path);
+    if (file.existsSync()) {
+      return FileImage(file);
+    }
+    return null;
   }
 }
 
@@ -489,33 +716,25 @@ class _HomeTab extends StatelessWidget {
     required this.isSosActive,
     required this.onSosActivated,
     required this.onStopSos,
+    required this.holdDuration,
   });
 
   final User? user;
   final bool isSosActive;
   final Future<void> Function() onSosActivated;
   final Future<void> Function() onStopSos;
+  final int holdDuration;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
     return ListView(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
       children: [
-        Text(
-          'Overview',
-          style: TextStyle(
-            fontSize: 24,
-            fontWeight: FontWeight.bold,
-            color: theme.colorScheme.onSurface,
-          ),
-        ),
-        const SizedBox(height: 18),
         _SosHoldButton(
           isSosActive: isSosActive,
           onActivated: onSosActivated,
           onStop: onStopSos,
+          holdDuration: holdDuration,
         ),
       ],
     );
@@ -527,11 +746,13 @@ class _SosHoldButton extends StatefulWidget {
     required this.isSosActive,
     required this.onActivated,
     required this.onStop,
+    required this.holdDuration,
   });
 
   final bool isSosActive;
   final Future<void> Function() onActivated;
   final Future<void> Function() onStop;
+  final int holdDuration;
 
   @override
   State<_SosHoldButton> createState() => _SosHoldButtonState();
@@ -541,13 +762,16 @@ class _SosHoldButtonState extends State<_SosHoldButton>
     with TickerProviderStateMixin {
   late final AnimationController _pulseController;
   late final AnimationController _holdController;
+  Timer? _activeCountdownTimer;
   bool _isHolding = false;
   bool _activated = false;
   bool _isProcessing = false;
+  int _activeCountdown = 2;
 
   @override
   void initState() {
     super.initState();
+    _activeCountdown = widget.holdDuration;
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1300),
@@ -555,7 +779,7 @@ class _SosHoldButtonState extends State<_SosHoldButton>
 
     _holdController = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 2),
+      duration: Duration(seconds: widget.holdDuration),
     )..addStatusListener((status) {
         if (status == AnimationStatus.completed && !_activated) {
           _activated = true;
@@ -565,10 +789,52 @@ class _SosHoldButtonState extends State<_SosHoldButton>
   }
 
   @override
+  void didUpdateWidget(covariant _SosHoldButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!oldWidget.isSosActive && widget.isSosActive) {
+      _startActiveCountdown();
+    } else if (oldWidget.isSosActive && !widget.isSosActive) {
+      _activeCountdownTimer?.cancel();
+      _activeCountdown = widget.holdDuration;
+    }
+
+    if (oldWidget.holdDuration != widget.holdDuration) {
+      _holdController.duration = Duration(seconds: widget.holdDuration);
+      if (!widget.isSosActive) {
+        _activeCountdown = widget.holdDuration;
+      }
+    }
+  }
+
+  @override
   void dispose() {
+    _activeCountdownTimer?.cancel();
     _pulseController.dispose();
     _holdController.dispose();
     super.dispose();
+  }
+
+  void _startActiveCountdown() {
+    _activeCountdownTimer?.cancel();
+    setState(() {
+      _activeCountdown = widget.holdDuration;
+    });
+    _activeCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted || !widget.isSosActive) {
+        timer.cancel();
+        return;
+      }
+      if (_activeCountdown <= 1) {
+        timer.cancel();
+        setState(() {
+          _activeCountdown = 0;
+        });
+        return;
+      }
+      setState(() {
+        _activeCountdown -= 1;
+      });
+    });
   }
 
   void _startHold() {
@@ -633,155 +899,297 @@ class _SosHoldButtonState extends State<_SosHoldButton>
 
   @override
   Widget build(BuildContext context) {
+    const accentColor = Color(0xFFFF4D6D);
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final panelColor = isDark ? const Color(0xFF121212) : Colors.white;
 
-    return _SurfaceCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Emergency SOS',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
-              color: Colors.red.shade600,
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOutCubic,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: widget.isSosActive ? const Color(0xFFFF7C93) : panelColor,
+        borderRadius: BorderRadius.circular(34),
+        border: Border.all(
+          color: widget.isSosActive
+              ? Colors.white.withValues(alpha: 0.32)
+              : (isDark ? const Color(0xFF232323) : const Color(0xFFF2D5DC)),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: accentColor.withValues(
+              alpha: widget.isSosActive ? 0.26 : (isDark ? 0.14 : 0.10),
             ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            widget.isSosActive
-                ? 'SOS is active. Voice recording is running and saved locally.'
-                : 'Press and hold for 2 seconds to trigger emergency assistance.',
-            style: TextStyle(
-              color: isDark ? const Color(0xFFA3A3A3) : const Color(0xFF6B7280),
-              fontSize: 13,
-            ),
-          ),
-          const SizedBox(height: 18),
-          Center(
-            child: widget.isSosActive
-                ? SizedBox(
-                    width: 210,
-                    child: FilledButton.icon(
-                      onPressed: _isProcessing ? null : _stopSos,
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Colors.red.shade700,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                      ),
-                      icon: _isProcessing
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Icon(Icons.stop_circle_outlined),
-                      label: const Text(
-                        'Stop SOS',
-                        style: TextStyle(fontWeight: FontWeight.w700),
-                      ),
-                    ),
-                  )
-                : GestureDetector(
-                    onTapDown: (_) => _startHold(),
-                    onTapUp: (_) => _endHold(),
-                    onTapCancel: _endHold,
-                    child: AnimatedBuilder(
-                      animation:
-                          Listenable.merge([_pulseController, _holdController]),
-                      builder: (context, _) {
-                        final pulse = 1 + (_pulseController.value * 0.05);
-                        return Stack(
-                          alignment: Alignment.center,
-                          children: [
-                            Transform.scale(
-                              scale: pulse,
-                              child: Container(
-                                width: 148,
-                                height: 148,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: Colors.red.withValues(
-                                      alpha: _isHolding ? 0.25 : 0.18),
-                                ),
-                              ),
-                            ),
-                            SizedBox(
-                              width: 136,
-                              height: 136,
-                              child: CircularProgressIndicator(
-                                value: _holdController.value,
-                                strokeWidth: 6,
-                                backgroundColor: isDark
-                                    ? const Color(0xFF2A2A2A)
-                                    : const Color(0xFFE5E7EB),
-                                valueColor: const AlwaysStoppedAnimation<Color>(
-                                    Colors.red),
-                              ),
-                            ),
-                            Container(
-                              width: 110,
-                              height: 110,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                gradient: LinearGradient(
-                                  begin: Alignment.topLeft,
-                                  end: Alignment.bottomRight,
-                                  colors: [
-                                    Colors.red.shade500,
-                                    Colors.red.shade800,
-                                  ],
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.red.withValues(alpha: 0.4),
-                                    blurRadius: 18,
-                                    offset: const Offset(0, 6),
-                                  ),
-                                ],
-                              ),
-                              child: const Center(
-                                child: Text(
-                                  'SOS',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 32,
-                                    fontWeight: FontWeight.w900,
-                                    letterSpacing: 2,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        );
-                      },
-                    ),
-                  ),
-          ),
-          const SizedBox(height: 12),
-          Center(
-            child: Text(
-              widget.isSosActive
-                  ? 'Recording will stop automatically when SOS is stopped'
-                  : _isHolding
-                      ? 'Hold... ${(_holdController.value * 2).clamp(0, 2).toStringAsFixed(1)}s / 2.0s'
-                      : 'Release before 2 seconds to cancel',
-              style: TextStyle(
-                fontWeight: FontWeight.w600,
-                color: _isHolding
-                    ? Colors.red
-                    : (isDark
-                        ? const Color(0xFFA3A3A3)
-                        : const Color(0xFF6B7280)),
-              ),
-            ),
+            blurRadius: widget.isSosActive ? 26 : 16,
+            offset: const Offset(0, 8),
           ),
         ],
       ),
+      child: widget.isSosActive
+          ? Column(
+              children: [
+                Container(
+                  width: 70,
+                  height: 70,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.22),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.44),
+                    ),
+                  ),
+                  child: const Icon(
+                    Icons.shield_rounded,
+                    color: Colors.white,
+                    size: 32,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                const Text(
+                  'Emergency alert sent',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 30,
+                    fontWeight: FontWeight.w800,
+                    height: 1.1,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Stay calm. Emergency mode is active and your SOS flow is running.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 22),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.fromLTRB(22, 22, 22, 18),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(30),
+                  ),
+                  child: Column(
+                    children: [
+                      Text(
+                        _activeCountdown > 0
+                            ? 'You can still cancel before the alert fully locks in.'
+                            : 'Emergency mode is fully active now.',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Color(0xFF6B7280),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          height: 1.35,
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Text(
+                        _activeCountdown > 0 ? '$_activeCountdown' : 'LIVE',
+                        style: TextStyle(
+                          fontSize: _activeCountdown > 0 ? 58 : 32,
+                          fontWeight: FontWeight.w900,
+                          color: accentColor,
+                          letterSpacing: _activeCountdown > 0 ? 1 : 2,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        _activeCountdown > 0
+                            ? 'seconds remaining'
+                            : 'help mode in progress',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Color(0xFF6B7280),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton(
+                          onPressed: _isProcessing ? null : _stopSos,
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: accentColor,
+                            side: BorderSide(
+                              color: accentColor.withValues(alpha: 0.28),
+                            ),
+                            padding: const EdgeInsets.symmetric(vertical: 15),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(18),
+                            ),
+                          ),
+                          child: _isProcessing
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Color(0xFFFF4D6D),
+                                  ),
+                                )
+                              : const Text(
+                                  'Cancel SOS',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 15,
+                                  ),
+                                ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            )
+          : Column(
+              children: [
+                Container(
+                  width: 54,
+                  height: 54,
+                  decoration: BoxDecoration(
+                    color: accentColor.withValues(alpha: 0.10),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.shield_outlined,
+                    color: accentColor,
+                    size: 26,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Emergency SOS',
+                  style: TextStyle(
+                    color: theme.colorScheme.onSurface,
+                    fontSize: 26,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Press and hold to trigger emergency help instantly.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: isDark
+                        ? const Color(0xFFA3A3A3)
+                        : const Color(0xFF6B7280),
+                    fontSize: 14,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 30),
+                GestureDetector(
+                  onTapDown: (_) => _startHold(),
+                  onTapUp: (_) => _endHold(),
+                  onTapCancel: _endHold,
+                  child: AnimatedBuilder(
+                    animation:
+                        Listenable.merge([_pulseController, _holdController]),
+                    builder: (context, _) {
+                      final pulse = 1 + (_pulseController.value * 0.045);
+                      return Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          Transform.scale(
+                            scale: pulse,
+                            child: Container(
+                              width: 208,
+                              height: 208,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: accentColor.withValues(alpha: 0.06),
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: 180,
+                            height: 180,
+                            child: CircularProgressIndicator(
+                              value: _holdController.value,
+                              strokeWidth: 5,
+                              backgroundColor:
+                                  accentColor.withValues(alpha: 0.10),
+                              valueColor: const AlwaysStoppedAnimation<Color>(
+                                accentColor,
+                              ),
+                            ),
+                          ),
+                          Container(
+                            width: 148,
+                            height: 148,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              gradient: const LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [
+                                  Color(0xFFFF6A87),
+                                  accentColor,
+                                ],
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: accentColor.withValues(alpha: 0.28),
+                                  blurRadius: 18,
+                                  offset: const Offset(0, 8),
+                                ),
+                              ],
+                            ),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  _isProcessing
+                                      ? Icons.sync_rounded
+                                      : Icons.warning_amber_rounded,
+                                  color: Colors.white,
+                                  size: 42,
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  _isProcessing ? 'WAIT' : 'SOS',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 1.2,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 22),
+                Text(
+                  _isHolding
+                      ? 'Hold... ${(_holdController.value * widget.holdDuration).clamp(0, widget.holdDuration).toStringAsFixed(1)}s / ${widget.holdDuration}.0s'
+                      : (_isProcessing
+                          ? 'Preparing SOS...'
+                          : 'Release before ${widget.holdDuration} seconds to cancel'),
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: _isHolding
+                        ? accentColor
+                        : (isDark
+                            ? const Color(0xFFA3A3A3)
+                            : const Color(0xFF6B7280)),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
     );
   }
 }
@@ -803,7 +1211,6 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
   Position? _position;
   latlng.LatLng? _nearestPoliceStation;
   latlng.LatLng? _lastRouteFetchOrigin;
-  String _nearestPoliceStationName = 'Nearest police station';
   List<latlng.LatLng> _routePoints = const [];
   double? _routeDistanceKm;
   double? _routeEtaMinutes;
@@ -977,7 +1384,6 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
       if (stations.isEmpty) {
         if (!mounted || _nearestPoliceStation != null) return;
         setState(() {
-          _nearestPoliceStationName = 'No nearby police station found';
           _routePoints = const [];
           _routeDistanceKm = null;
           _routeEtaMinutes = null;
@@ -1039,7 +1445,6 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
       final durationSeconds = selectedRoute?.durationSeconds;
       setState(() {
         _nearestPoliceStation = station.position;
-        _nearestPoliceStationName = station.name;
         _routePoints = selectedRoute?.points ??
             [
               origin,
@@ -1052,9 +1457,6 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
       });
     } catch (_) {
       if (!mounted || _nearestPoliceStation != null) return;
-      setState(() {
-        _nearestPoliceStationName = 'Unable to load nearest police station';
-      });
     } finally {
       _isFetchingPoliceRoute = false;
     }
@@ -1509,29 +1911,76 @@ out body;
                 Container(
                   width: double.infinity,
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                   decoration: BoxDecoration(
-                    color: Colors.red.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(14),
-                    border:
-                        Border.all(color: Colors.red.withValues(alpha: 0.35)),
+                    gradient: const LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [Color(0xFF3A0B15), Color(0xFF16070A)],
+                    ),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: const Color(0xFFFF4D6D).withValues(alpha: 0.30),
+                    ),
                   ),
                   child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.mic, color: Colors.red),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          'SOS is active. Voice recording is running and stored locally.',
-                          style: TextStyle(
-                            color: theme.colorScheme.onSurface,
-                            fontWeight: FontWeight.w600,
-                          ),
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color:
+                              const Color(0xFFFF4D6D).withValues(alpha: 0.18),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: const Icon(
+                          Icons.graphic_eq_rounded,
+                          color: Colors.white,
                         ),
                       ),
-                      TextButton(
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'SOS emergency mode is active',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Voice recording is running, and the live route stays focused on nearby police support.',
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.78),
+                                height: 1.35,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      FilledButton(
                         onPressed: widget.onStopSos,
-                        child: const Text('Stop SOS'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: const Color(0xFF9F1239),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 12,
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                        child: const Text(
+                          'Stop',
+                          style: TextStyle(fontWeight: FontWeight.w800),
+                        ),
                       ),
                     ],
                   ),
@@ -1705,107 +2154,7 @@ out body;
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: isDark ? 0.62 : 0.7),
-                    borderRadius: BorderRadius.circular(999),
-                    border:
-                        Border.all(color: Colors.white.withValues(alpha: 0.18)),
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.local_police,
-                          color: Color(0xFFFFD54F), size: 16),
-                      SizedBox(width: 6),
-                      Text(
-                        'Police Walk Route',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const Spacer(),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: isDark ? 0.62 : 0.7),
-                    borderRadius: BorderRadius.circular(999),
-                    border:
-                        Border.all(color: Colors.white.withValues(alpha: 0.18)),
-                  ),
-                  child: Text(
-                    'GPS ${_position!.accuracy.toStringAsFixed(0)}m',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
-              ],
-            ),
             const Spacer(),
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: isDark ? 0.7 : 0.82),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 42,
-                    height: 42,
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.primary.withValues(alpha: 0.22),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Icon(Icons.route, color: theme.colorScheme.primary),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _nearestPoliceStationName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 14,
-                          ),
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          _nearestPoliceStation == null
-                              ? 'Finding nearest police station...'
-                              : 'Shortest walking path using A* + Dijkstra',
-                          style: const TextStyle(
-                            color: Color(0xFFD1D5DB),
-                            fontWeight: FontWeight.w500,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 10),
             Align(
               alignment: Alignment.bottomRight,
               child: Container(
@@ -1989,12 +2338,31 @@ class _EmergencyContactsTabState extends State<_EmergencyContactsTab> {
   }
 
   Future<void> _loadContacts() async {
-    final contacts = await _service.getContacts();
-    if (!mounted) return;
-    setState(() {
-      _contacts = contacts;
-      _isLoading = false;
-    });
+    try {
+      final contacts = await _service.getContacts();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _contacts = contacts;
+        _isLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isLoading = false;
+      });
+      final message = e.toString().replaceFirst('Bad state: ', '').trim();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            message.isEmpty ? 'Could not load emergency contacts.' : message,
+          ),
+        ),
+      );
+    }
   }
 
   Future<void> _openContactSheet({EmergencyContact? contact}) async {
@@ -2034,31 +2402,15 @@ class _EmergencyContactsTabState extends State<_EmergencyContactsTab> {
       children: [
         Row(
           children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Emergency Contacts',
-                    style: TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
-                      color: theme.colorScheme.onSurface,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Keep trusted people ready for one-tap access.',
-                    style: TextStyle(
-                      color: isDark
-                          ? const Color(0xFFA3A3A3)
-                          : const Color(0xFF6B7280),
-                    ),
-                  ),
-                ],
+            Text(
+              'Emergency Contacts',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: theme.colorScheme.onSurface,
               ),
             ),
-            const SizedBox(width: 12),
+            const Spacer(),
             FilledButton.icon(
               onPressed: () => _openContactSheet(),
               icon: const Icon(Icons.add),
@@ -2067,66 +2419,19 @@ class _EmergencyContactsTabState extends State<_EmergencyContactsTab> {
           ],
         ),
         const SizedBox(height: 16),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: theme.colorScheme.primary.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 42,
-                height: 42,
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primary.withValues(alpha: 0.14),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Icon(
-                  Icons.shield_outlined,
-                  color: theme.colorScheme.primary,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  _contacts.isEmpty
-                      ? 'Add at least one trusted person so you can reach them quickly in an emergency.'
-                      : 'Tap any card below to call, edit, or remove a saved contact.',
-                  style: TextStyle(
-                    color: theme.colorScheme.onSurface,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 13,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
         if (_contacts.isEmpty)
-          _SurfaceCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'No contacts saved yet',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    color: theme.colorScheme.onSurface,
-                  ),
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 36),
+              child: Text(
+                'No contacts saved yet',
+                style: TextStyle(
+                  color: isDark
+                      ? const Color(0xFFA3A3A3)
+                      : const Color(0xFF6B7280),
+                  fontWeight: FontWeight.w600,
                 ),
-                const SizedBox(height: 6),
-                Text(
-                  'Add trusted contacts so you can call them quickly during emergencies.',
-                  style: TextStyle(
-                    color: isDark
-                        ? const Color(0xFFA3A3A3)
-                        : const Color(0xFF6B7280),
-                  ),
-                ),
-              ],
+              ),
             ),
           )
         else
@@ -2162,30 +2467,95 @@ class _StoredEmergencyContactTile extends StatelessWidget {
   final VoidCallback onEdit;
   final VoidCallback onDelete;
 
+  bool _isRemotePath(String? value) {
+    final path = (value ?? '').trim().toLowerCase();
+    return path.startsWith('http://') || path.startsWith('https://');
+  }
+
+  ImageProvider<Object>? _contactImageProvider() {
+    final path = (contact.profilePhotoPath ?? '').trim();
+    if (path.isEmpty) {
+      return null;
+    }
+    if (_isRemotePath(path)) {
+      return NetworkImage(path);
+    }
+    final file = File(path);
+    if (file.existsSync()) {
+      return FileImage(file);
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
 
-    return _SurfaceCard(
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: isDark ? const Color(0xFF2A2A2A) : const Color(0xFFE5E7EB),
+        ),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.person_outline),
-              const SizedBox(width: 8),
+              CircleAvatar(
+                radius: 20,
+                backgroundColor:
+                    theme.colorScheme.primary.withValues(alpha: 0.12),
+                foregroundColor: theme.colorScheme.primary,
+                backgroundImage: _contactImageProvider(),
+                child: _contactImageProvider() == null
+                    ? const Icon(Icons.person_outline)
+                    : null,
+              ),
+              const SizedBox(width: 12),
               Expanded(
-                child: Text(
-                  contact.name,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    color: theme.colorScheme.onSurface,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      contact.name,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: theme.colorScheme.onSurface,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      contact.phoneNumber,
+                      style: TextStyle(
+                        color: isDark
+                            ? const Color(0xFFA3A3A3)
+                            : const Color(0xFF6B7280),
+                      ),
+                    ),
+                    if ((contact.username ?? '').isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 3),
+                        child: Text(
+                          '@${contact.username}',
+                          style: TextStyle(
+                            color: theme.colorScheme.primary,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
               if (contact.isPrimary)
                 Container(
+                  margin: const EdgeInsets.only(right: 4),
                   padding:
                       const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                   decoration: BoxDecoration(
@@ -2201,46 +2571,30 @@ class _StoredEmergencyContactTile extends StatelessWidget {
                     ),
                   ),
                 ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              const Icon(Icons.phone_iphone, size: 18),
-              const SizedBox(width: 8),
-              Text(
-                contact.phoneNumber,
-                style: TextStyle(color: theme.colorScheme.onSurface),
+              PopupMenuButton<String>(
+                onSelected: (value) {
+                  if (value == 'edit') {
+                    onEdit();
+                  } else if (value == 'delete') {
+                    onDelete();
+                  }
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem<String>(value: 'edit', child: Text('Edit')),
+                  PopupMenuItem<String>(value: 'delete', child: Text('Delete')),
+                ],
+                icon: Icon(Icons.more_vert, color: theme.colorScheme.onSurface),
               ),
             ],
           ),
           const SizedBox(height: 14),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: onCall,
-                  icon: const Icon(Icons.call_outlined),
-                  label: const Text('Call'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: onEdit,
-                  icon: const Icon(Icons.edit_outlined),
-                  label: const Text('Edit'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: onDelete,
-                  icon: const Icon(Icons.delete_outline),
-                  label: const Text('Delete'),
-                ),
-              ),
-            ],
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: onCall,
+              icon: const Icon(Icons.call_outlined),
+              label: const Text('Call'),
+            ),
           ),
         ],
       ),
@@ -2248,193 +2602,997 @@ class _StoredEmergencyContactTile extends StatelessWidget {
   }
 }
 
-class _ProfileTab extends StatelessWidget {
-  const _ProfileTab({required this.user});
+class _ProfileTab extends StatefulWidget {
+  const _ProfileTab({
+    required this.user,
+    required this.onProfilePhotoChanged,
+  });
 
   final User? user;
+  final ValueChanged<String?> onProfilePhotoChanged;
+
+  @override
+  State<_ProfileTab> createState() => _ProfileTabState();
+}
+
+class _ProfileTabState extends State<_ProfileTab> {
+  final _service = EmergencyContactsService();
+  final _usernameService = UsernameService();
+  final _imagePicker = ImagePicker();
+  bool _isLoadingContacts = true;
+  List<EmergencyContact> _contacts = const [];
+  String? _username;
+  String? _profilePhotoPath;
+
+  bool _isRemotePhoto(String? value) {
+    final path = (value ?? '').trim().toLowerCase();
+    return path.startsWith('http://') || path.startsWith('https://');
+  }
+
+  ImageProvider<Object>? _profileImageProvider() {
+    final pathValue = (_profilePhotoPath ?? '').trim();
+    if (pathValue.isEmpty) {
+      return null;
+    }
+    if (_isRemotePhoto(pathValue)) {
+      return NetworkImage(pathValue);
+    }
+    final file = File(pathValue);
+    if (file.existsSync()) {
+      return FileImage(file);
+    }
+    return null;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadContacts();
+    _loadUsername();
+    _loadProfilePhoto();
+  }
+
+  Future<void> _loadProfilePhoto() async {
+    final userId = widget.user?.uid;
+    if (userId == null) {
+      return;
+    }
+    final remoteProfile =
+        await _usernameService.getPublicProfileForUserId(userId);
+    final prefs = await SharedPreferences.getInstance();
+    final path = (remoteProfile?.profilePhotoPath ??
+            prefs.getString('profile_photo_$userId') ??
+            '')
+        .trim();
+    if (path.isNotEmpty) {
+      await prefs.setString('profile_photo_$userId', path);
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _profilePhotoPath = path.isEmpty ? null : path;
+    });
+    widget.onProfilePhotoChanged(path.isEmpty ? null : path);
+  }
+
+  Future<void> _pickProfilePhoto() async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('Choose from gallery'),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(ImageSource.gallery),
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_camera_outlined),
+                title: const Text('Take a photo'),
+                onTap: () => Navigator.of(sheetContext).pop(ImageSource.camera),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (source == null || widget.user == null) {
+      return;
+    }
+
+    final picked = await _imagePicker.pickImage(
+      source: source,
+      maxWidth: 1200,
+      imageQuality: 85,
+    );
+    if (picked == null) {
+      return;
+    }
+
+    final appDirectory = await getApplicationDocumentsDirectory();
+    final profileDirectory =
+        Directory(path.join(appDirectory.path, 'profile_photos'));
+    await profileDirectory.create(recursive: true);
+
+    final extension = path.extension(picked.path).toLowerCase();
+    final safeExtension = extension.isEmpty
+        ? '.jpg'
+        : (extension.length > 5 ? '.jpg' : extension);
+    final targetPath = path.join(
+      profileDirectory.path,
+      'profile_${widget.user!.uid}$safeExtension',
+    );
+    final savedFile = await File(picked.path).copy(targetPath);
+
+    var finalPath = savedFile.path;
+    final uploadedUrl = await _usernameService.uploadProfilePhoto(
+      user: widget.user!,
+      localFilePath: savedFile.path,
+    );
+    if ((uploadedUrl ?? '').trim().isNotEmpty) {
+      finalPath = uploadedUrl!.trim();
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('profile_photo_${widget.user!.uid}', finalPath);
+    if ((_username ?? '').trim().isNotEmpty) {
+      await _usernameService.upsertPublicProfile(
+        user: widget.user!,
+        username: _username!,
+        displayName: widget.user!.displayName,
+        phoneNumber: widget.user!.phoneNumber,
+        photoPath: finalPath,
+      );
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _profilePhotoPath = finalPath;
+    });
+    widget.onProfilePhotoChanged(finalPath);
+  }
+
+  Future<void> _loadUsername() async {
+    final userId = widget.user?.uid;
+    if (userId == null) {
+      return;
+    }
+    String? username;
+    try {
+      username = await _usernameService.getUsernameForUserId(userId);
+    } catch (_) {
+      username = null;
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _username = username;
+    });
+  }
+
+  Future<void> _loadContacts() async {
+    try {
+      final contacts = await _service.getContacts();
+      final mergedContacts = await _syncContactProfilePhotos(contacts);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _contacts = mergedContacts;
+        _isLoadingContacts = false;
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isLoadingContacts = false;
+      });
+      final message = e.toString().replaceFirst('Bad state: ', '').trim();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            message.isEmpty ? 'Could not load emergency contacts.' : message,
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<List<EmergencyContact>> _syncContactProfilePhotos(
+    List<EmergencyContact> contacts,
+  ) async {
+    final updated = <EmergencyContact>[];
+    for (final contact in contacts) {
+      final hasPhoto = (contact.profilePhotoPath ?? '').trim().isNotEmpty;
+      final username = (contact.username ?? '').trim();
+      if (hasPhoto || username.isEmpty) {
+        updated.add(contact);
+        continue;
+      }
+
+      try {
+        final results = await _usernameService.searchUsers(username, limit: 10);
+        ProtegoUserSuggestion? matched;
+        for (final item in results) {
+          if (item.username == username) {
+            matched = item;
+            break;
+          }
+        }
+        final remotePhoto = (matched?.profilePhotoPath ?? '').trim();
+        if (remotePhoto.isNotEmpty) {
+          final merged = contact.copyWith(profilePhotoPath: remotePhoto);
+          await _service.saveContact(merged);
+          updated.add(merged);
+        } else {
+          updated.add(contact);
+        }
+      } catch (_) {
+        updated.add(contact);
+      }
+    }
+    return updated;
+  }
+
+  Future<void> _openContactSheet({EmergencyContact? contact}) async {
+    final didSave = await showEmergencyContactEditorSheet(
+      context,
+      contact: contact,
+      suggestPrimary: _contacts.isEmpty,
+      onSave: _service.saveContact,
+    );
+    if (!mounted || !didSave) {
+      return;
+    }
+    await _loadContacts();
+  }
+
+  Future<void> _callContact(String phoneNumber) async {
+    final uri = Uri(scheme: 'tel', path: phoneNumber);
+    if (!await launchUrl(uri)) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not place the call.')),
+      );
+    }
+  }
+
+  String _profileName() {
+    final user = widget.user;
+    if ((user?.displayName ?? '').trim().isNotEmpty) {
+      return user!.displayName!.trim();
+    }
+    if ((user?.email ?? '').trim().isNotEmpty) {
+      return user!.email!.split('@').first;
+    }
+    return 'Protego User';
+  }
+
+  String _profileInitials() {
+    final parts = _profileName()
+        .split(RegExp(r'\s+'))
+        .where((part) => part.isNotEmpty)
+        .toList();
+    if (parts.isEmpty) {
+      return 'P';
+    }
+    if (parts.length == 1) {
+      return parts.first.substring(0, 1).toUpperCase();
+    }
+    return (parts.first.substring(0, 1) + parts.last.substring(0, 1))
+        .toUpperCase();
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final user = widget.user;
+
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        _SurfaceCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Account details',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  color: theme.colorScheme.onSurface,
-                ),
-              ),
-              const SizedBox(height: 12),
-              _ProfileRow(label: 'Name', value: user?.displayName ?? 'Not set'),
-              _ProfileRow(label: 'Email', value: user?.email ?? 'Not linked'),
-              _ProfileRow(
-                  label: 'Phone', value: user?.phoneNumber ?? 'Not linked'),
-            ],
+        Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: isDark
+                  ? const [Color(0xFF161616), Color(0xFF090909)]
+                  : const [Colors.white, Color(0xFFFDF2F8)],
+            ),
+            borderRadius: BorderRadius.circular(28),
+            border: Border.all(
+              color: isDark ? const Color(0xFF2A2A2A) : const Color(0xFFF3D2E0),
+            ),
           ),
-        ),
-        const SizedBox(height: 14),
-        _SurfaceCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Row(
             children: [
-              Row(
+              Stack(
                 children: [
-                  Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.primary.withValues(alpha: 0.14),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Icon(
-                      Icons.library_music_outlined,
-                      color: theme.colorScheme.primary,
-                    ),
+                  CircleAvatar(
+                    radius: 36,
+                    backgroundColor:
+                        theme.colorScheme.primary.withValues(alpha: 0.18),
+                    backgroundImage: _profileImageProvider(),
+                    child: _profileImageProvider() == null
+                        ? Text(
+                            _profileInitials(),
+                            style: TextStyle(
+                              color: theme.colorScheme.primary,
+                              fontSize: 24,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          )
+                        : null,
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'SOS recordings',
-                          style: TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w700,
-                            color: theme.colorScheme.onSurface,
+                  Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: InkWell(
+                      onTap: _pickProfilePhoto,
+                      child: Container(
+                        width: 24,
+                        height: 24,
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.primary,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: isDark ? Colors.black : Colors.white,
+                            width: 2,
                           ),
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Open the locally stored emergency audio files and review their saved file paths.',
+                        child: const Icon(
+                          Icons.photo_camera_outlined,
+                          size: 12,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _profileName(),
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800,
+                        color: theme.colorScheme.onSurface,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    if ((_username ?? '').isNotEmpty)
+                      Text(
+                        '@${_username!}',
+                        style: TextStyle(
+                          color: theme.colorScheme.primary,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    if ((_username ?? '').isNotEmpty) const SizedBox(height: 4),
+                    if ((user?.email ?? '').isNotEmpty)
+                      Text(
+                        user!.email!,
+                        style: TextStyle(
+                          color: isDark
+                              ? const Color(0xFFA3A3A3)
+                              : const Color(0xFF6B7280),
+                        ),
+                      ),
+                    if ((user?.phoneNumber ?? '').isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          user!.phoneNumber!,
                           style: TextStyle(
                             color: isDark
                                 ? const Color(0xFFA3A3A3)
                                 : const Color(0xFF6B7280),
                           ),
                         ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 14),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => const SosRecordingsScreen(),
                       ),
-                    );
-                  },
-                  icon: const Icon(Icons.playlist_play),
-                  label: const Text('View SOS Recordings'),
+                  ],
                 ),
               ),
             ],
           ),
         ),
-      ],
-    );
-  }
-}
-
-class _ProfileRow extends StatelessWidget {
-  const _ProfileRow({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 72,
-            child: Text(
-              label,
-              style: TextStyle(
-                fontWeight: FontWeight.w600,
-                color: theme.colorScheme.onSurface.withValues(alpha: 0.75),
-              ),
-            ),
-          ),
-          Expanded(
-            child: Text(
-              value,
-              style: TextStyle(color: theme.colorScheme.onSurface),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SettingsTab extends StatelessWidget {
-  const _SettingsTab({required this.themeModeController});
-
-  final ValueNotifier<ThemeMode> themeModeController;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return ListView(
-      padding: const EdgeInsets.all(20),
-      children: [
+        const SizedBox(height: 16),
         _SurfaceCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Theme mode',
+                'Primary contacts',
                 style: TextStyle(
                   fontSize: 18,
                   fontWeight: FontWeight.w700,
                   color: theme.colorScheme.onSurface,
                 ),
               ),
+              const SizedBox(height: 4),
+              Text(
+                'Edit trusted people with name and phone number for quick SOS access.',
+                style: TextStyle(
+                  color: isDark
+                      ? const Color(0xFFA3A3A3)
+                      : const Color(0xFF6B7280),
+                ),
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: () => _openContactSheet(),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add contact'),
+                ),
+              ),
+              const SizedBox(height: 14),
+              if (_isLoadingContacts)
+                Center(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    child: CircularProgressIndicator(
+                      color: theme.colorScheme.primary,
+                    ),
+                  ),
+                )
+              else if (_contacts.isEmpty)
+                Text(
+                  'No primary contacts saved yet.',
+                  style: TextStyle(
+                    color: isDark
+                        ? const Color(0xFFA3A3A3)
+                        : const Color(0xFF6B7280),
+                    fontWeight: FontWeight.w500,
+                  ),
+                )
+              else
+                ..._contacts.map(
+                  (contact) => Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: _StoredEmergencyContactTile(
+                      contact: contact,
+                      onCall: () => _callContact(contact.phoneNumber),
+                      onEdit: () => _openContactSheet(contact: contact),
+                      onDelete: () async {
+                        await _service.deleteContact(contact.id!);
+                        await _loadContacts();
+                      },
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SettingsTab extends StatelessWidget {
+  const _SettingsTab({
+    required this.user,
+    required this.themeModeController,
+    required this.onOpenEmergencyContacts,
+    required this.onLogout,
+    required this.autoVideoRecord,
+    required this.autoVoiceRecord,
+    required this.vibrationOnSos,
+    required this.holdDuration,
+    required this.onAutoVideoRecordChanged,
+    required this.onAutoVoiceRecordChanged,
+    required this.onVibrationOnSosChanged,
+    required this.onHoldDurationChanged,
+  });
+
+  final User? user;
+  final ValueNotifier<ThemeMode> themeModeController;
+  final VoidCallback onOpenEmergencyContacts;
+  final Future<void> Function() onLogout;
+  final bool autoVideoRecord;
+  final bool autoVoiceRecord;
+  final bool vibrationOnSos;
+  final int holdDuration;
+  final ValueChanged<bool> onAutoVideoRecordChanged;
+  final ValueChanged<bool> onAutoVoiceRecordChanged;
+  final ValueChanged<bool> onVibrationOnSosChanged;
+  final ValueChanged<int> onHoldDurationChanged;
+
+  Future<void> _showAccountDetailsSheet(BuildContext context) async {
+    final currentUser = user;
+    if (currentUser == null) {
+      return;
+    }
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return FutureBuilder<String?>(
+          future: UsernameService().getUsernameForUserId(currentUser.uid),
+          builder: (context, snapshot) {
+            final username = snapshot.data;
+            return SafeArea(
+              top: false,
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surface,
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(24)),
+                  border: Border.all(
+                    color: isDark
+                        ? const Color(0xFF2A2A2A)
+                        : const Color(0xFFE5E7EB),
+                  ),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 42,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: isDark
+                              ? const Color(0xFF3A3A3A)
+                              : const Color(0xFFD1D5DB),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Account details',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                        color: theme.colorScheme.onSurface,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    _buildAccountRow(
+                        context,
+                        'Username',
+                        (username?.isNotEmpty ?? false)
+                            ? '@$username'
+                            : 'Not set'),
+                    _buildAccountRow(
+                        context, 'Name', currentUser.displayName ?? 'Not set'),
+                    _buildAccountRow(
+                        context, 'Email', currentUser.email ?? 'Not linked'),
+                    _buildAccountRow(context, 'Phone',
+                        currentUser.phoneNumber ?? 'Not linked'),
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        onPressed: () => Navigator.of(sheetContext).pop(),
+                        child: const Text('Done'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildAccountRow(BuildContext context, String label, String value) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 86,
+            child: Text(
+              label,
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color:
+                    isDark ? const Color(0xFFA3A3A3) : const Color(0xFF6B7280),
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                color: theme.colorScheme.onSurface,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _handleLogout(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Log out?'),
+          content: const Text('You will need to sign in again to continue.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Log out'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) {
+      return;
+    }
+
+    try {
+      await onLogout();
+      if (!context.mounted) {
+        return;
+      }
+
+      if (FirebaseAuth.instance.currentUser != null) {
+        await FirebaseAuth.instance.signOut();
+      }
+
+      if (!context.mounted) {
+        return;
+      }
+
+      if (FirebaseAuth.instance.currentUser != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Could not complete logout. Please try again.')),
+        );
+        return;
+      }
+
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const AuthGate()),
+        (route) => false,
+      );
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not log out. Please try again.')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    return ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
+        Text(
+          'Settings',
+          style: TextStyle(
+            fontSize: 30,
+            fontWeight: FontWeight.w800,
+            color: theme.colorScheme.onSurface,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'Manage account, appearance and safety options',
+          style: TextStyle(
+            color: isDark ? const Color(0xFFA3A3A3) : const Color(0xFF6B7280),
+            fontSize: 14,
+          ),
+        ),
+        const SizedBox(height: 18),
+        const _SettingsSectionHeader(title: 'Account'),
+        _SurfaceCard(
+          child: Column(
+            children: [
+              _SettingsTile(
+                assetIconPath: 'assets/add-contact.png',
+                title: 'Profile & contacts',
+                subtitle: 'Manage profile and emergency contacts',
+                onTap: onOpenEmergencyContacts,
+              ),
               const SizedBox(height: 10),
-              SegmentedButton<ThemeMode>(
-                segments: const [
-                  ButtonSegment<ThemeMode>(
-                    value: ThemeMode.system,
-                    label: Text('System'),
-                    icon: Icon(Icons.settings_suggest_outlined),
-                  ),
-                  ButtonSegment<ThemeMode>(
-                    value: ThemeMode.light,
-                    label: Text('Light'),
-                    icon: Icon(Icons.light_mode_outlined),
-                  ),
-                  ButtonSegment<ThemeMode>(
-                    value: ThemeMode.dark,
-                    label: Text('Dark'),
-                    icon: Icon(Icons.dark_mode_outlined),
-                  ),
-                ],
-                selected: <ThemeMode>{themeModeController.value},
-                onSelectionChanged: (selection) {
-                  themeModeController.value = selection.first;
+              _SettingsTile(
+                assetIconPath: 'assets/profile.png',
+                title: 'Account details',
+                subtitle: 'View your username, email and phone',
+                onTap: () => _showAccountDetailsSheet(context),
+              ),
+              const SizedBox(height: 10),
+              _SettingsTile(
+                assetIconPath: 'assets/folder.png',
+                title: 'SOS recordings',
+                subtitle: 'Open saved SOS audio recordings',
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const SosRecordingsScreen(),
+                    ),
+                  );
                 },
               ),
             ],
           ),
         ),
+        const SizedBox(height: 14),
+        const _SettingsSectionHeader(title: 'Preferences'),
+        _SurfaceCard(
+          child: Column(
+            children: [
+              const _SettingsTile(
+                assetIconPath: 'assets/night-mode.png',
+                title: 'Theme mode',
+                subtitle: 'Choose how Protego looks on your device',
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: SegmentedButton<ThemeMode>(
+                  segments: const [
+                    ButtonSegment<ThemeMode>(
+                      value: ThemeMode.system,
+                      label: Text('System'),
+                      icon: Icon(Icons.settings_suggest_outlined),
+                    ),
+                    ButtonSegment<ThemeMode>(
+                      value: ThemeMode.light,
+                      label: Text('Light'),
+                      icon: Icon(Icons.light_mode_outlined),
+                    ),
+                    ButtonSegment<ThemeMode>(
+                      value: ThemeMode.dark,
+                      label: Text('Dark'),
+                      icon: Icon(Icons.dark_mode_outlined),
+                    ),
+                  ],
+                  selected: <ThemeMode>{themeModeController.value},
+                  onSelectionChanged: (selection) {
+                    themeModeController.value = selection.first;
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        const _SettingsSectionHeader(title: 'SOS Automation'),
+        _SurfaceCard(
+          child: Column(
+            children: [
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                value: autoVideoRecord,
+                onChanged: onAutoVideoRecordChanged,
+                title: const Text(
+                  'Auto video record',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                subtitle: const Text(
+                    'Start video recording automatically on SOS (no start button)'),
+              ),
+              const Divider(height: 1),
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                value: autoVoiceRecord,
+                onChanged: onAutoVoiceRecordChanged,
+                title: const Text(
+                  'Auto voice record',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                subtitle:
+                    const Text('Record emergency audio when SOS triggers'),
+              ),
+              const Divider(height: 1),
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                value: vibrationOnSos,
+                onChanged: onVibrationOnSosChanged,
+                title: const Text(
+                  'Vibration on SOS',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                subtitle:
+                    const Text('Vibrate device immediately after SOS trigger'),
+              ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Hold Duration to Trigger SOS',
+                  style: TextStyle(
+                    color: theme.colorScheme.onSurface,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              SegmentedButton<int>(
+                segments: const [
+                  ButtonSegment<int>(value: 2, label: Text('2s')),
+                  ButtonSegment<int>(value: 5, label: Text('5s')),
+                  ButtonSegment<int>(value: 7, label: Text('7s')),
+                ],
+                selected: <int>{holdDuration},
+                onSelectionChanged: (selection) {
+                  onHoldDurationChanged(selection.first);
+                },
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        const _SettingsSectionHeader(title: 'Security'),
+        _SurfaceCard(
+          child: _SettingsTile(
+            assetIconPath: 'assets/logout.png',
+            title: 'Logout',
+            subtitle: 'Sign out of your account securely',
+            onTap: () => _handleLogout(context),
+            isDestructive: true,
+          ),
+        ),
       ],
+    );
+  }
+}
+
+class _SettingsSectionHeader extends StatelessWidget {
+  const _SettingsSectionHeader({required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+      child: Text(
+        title,
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
+          color: isDark ? const Color(0xFFA3A3A3) : const Color(0xFF6B7280),
+          letterSpacing: 0.2,
+        ),
+      ),
+    );
+  }
+}
+
+class _SettingsTile extends StatelessWidget {
+  const _SettingsTile({
+    required this.title,
+    required this.subtitle,
+    this.assetIconPath,
+    this.onTap,
+    this.isDestructive = false,
+  });
+
+  final String? assetIconPath;
+  final String title;
+  final String subtitle;
+  final VoidCallback? onTap;
+  final bool isDestructive;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? const Color(0xFF171717)
+                      : const Color(0xFFF3F4F6),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Center(
+                  child: assetIconPath != null
+                      ? Image.asset(
+                          assetIconPath!,
+                          width: 21,
+                          height: 21,
+                          color: isDark ? Colors.white : null,
+                        )
+                      : Icon(
+                          Icons.circle,
+                          color: isDestructive
+                              ? const Color(0xFFE11D48)
+                              : theme.colorScheme.onSurface,
+                          size: 21,
+                        ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: isDestructive
+                            ? const Color(0xFFE11D48)
+                            : theme.colorScheme.onSurface,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        color:
+                            theme.colorScheme.onSurface.withValues(alpha: 0.62),
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: theme.colorScheme.onSurface.withValues(alpha: 0.45),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
