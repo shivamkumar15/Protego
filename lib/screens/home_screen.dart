@@ -1471,7 +1471,7 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
     final uri =
         Uri.https('overpass-api.de', '/api/interpreter', {'data': query});
     final response = await http.get(uri, headers: {
-      'User-Agent': 'Protego/1.0 (safety app)',
+      'User-Agent': 'Aegixa/1.0 (safety app)',
       'Accept': 'application/json',
     });
 
@@ -1629,7 +1629,7 @@ out body;
     final uri =
         Uri.https('overpass-api.de', '/api/interpreter', {'data': query});
     final response = await http.get(uri, headers: {
-      'User-Agent': 'Protego/1.0 (safety app)',
+      'User-Agent': 'Aegixa/1.0 (safety app)',
       'Accept': 'application/json',
     });
 
@@ -2087,7 +2087,7 @@ out body;
       children: [
         TileLayer(
           urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-          userAgentPackageName: 'com.example.protego',
+           userAgentPackageName: 'com.example.aegixa',
           retinaMode: RetinaMode.isHighDensity(context),
           maxNativeZoom: 19,
         ),
@@ -2821,7 +2821,7 @@ class _ProfileTabState extends State<_ProfileTab> {
 
       try {
         final results = await _usernameService.searchUsers(username, limit: 10);
-        ProtegoUserSuggestion? matched;
+         AegixaUserSuggestion? matched;
         for (final item in results) {
           if (item.username == username) {
             matched = item;
@@ -2876,7 +2876,7 @@ class _ProfileTabState extends State<_ProfileTab> {
     if ((user?.email ?? '').trim().isNotEmpty) {
       return user!.email!.split('@').first;
     }
-    return 'Protego User';
+    return 'Aegixa User';
   }
 
   String _profileInitials() {
@@ -3362,7 +3362,7 @@ class _SettingsTab extends StatelessWidget {
               const _SettingsTile(
                 assetIconPath: 'assets/night-mode.png',
                 title: 'Theme mode',
-                subtitle: 'Choose how Protego looks on your device',
+                subtitle: 'Choose how Aegixa looks on your device',
               ),
               const SizedBox(height: 10),
               SizedBox(

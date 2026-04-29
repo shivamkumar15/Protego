@@ -1,4 +1,4 @@
-name: protego
+name: aegixa
 description: "Guardian Safety App"
 publish_to: 'none'
 
@@ -47,10 +47,10 @@ dev_dependencies:
 flutter_launcher_icons:
   android: true
   ios: false
-  image_path: assets/MainIcon.png
+  image_path: assets/Icon.png
   adaptive_icon_background: "#000000"
-  adaptive_icon_foreground: assets/MainIcon.png
-  adaptive_icon_foreground_inset: 4
+  adaptive_icon_foreground: assets/Icon.png
+  adaptive_icon_foreground_inset: 16
 
 flutter:
   uses-material-design: true

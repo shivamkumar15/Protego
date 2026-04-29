@@ -180,7 +180,7 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
                     ),
                     const SizedBox(height: 10),
                     Text(
-                      'Protego needs location and microphone access from the start so SOS, live tracking, and emergency evidence work instantly.',
+                      'Aegixa needs location and microphone access from the start so SOS, live tracking, and emergency evidence work instantly.',
                       style: TextStyle(
                         fontSize: 15,
                         height: 1.5,
@@ -222,7 +222,7 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
                         ),
                       ),
                       child: Text(
-                        'You only need to do this once after installation. If you deny a permission permanently, Protego will open app settings so you can enable it.',
+                        'You only need to do this once after installation. If you deny a permission permanently, Aegixa will open app settings so you can enable it.',
                         style: TextStyle(
                           color: isDark
                               ? const Color(0xFFA3A3A3)

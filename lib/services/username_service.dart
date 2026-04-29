@@ -3,8 +3,8 @@ import 'dart:io';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide User;
 
-class ProtegoUserSuggestion {
-  const ProtegoUserSuggestion({
+class AegixaUserSuggestion {
+  const AegixaUserSuggestion({
     required this.uid,
     required this.username,
     this.displayName,
@@ -19,8 +19,8 @@ class ProtegoUserSuggestion {
   final String? profilePhotoPath;
 }
 
-class ProtegoPublicProfile {
-  const ProtegoPublicProfile({
+class AegixaPublicProfile {
+  const AegixaPublicProfile({
     required this.uid,
     this.username,
     this.displayName,
@@ -216,13 +216,13 @@ class UsernameService {
     );
   }
 
-  Future<List<ProtegoUserSuggestion>> searchUsers(
+  Future<List<AegixaUserSuggestion>> searchUsers(
     String rawQuery, {
     int limit = 8,
   }) async {
     final query = normalizeForInput(rawQuery);
     if (query.length < 2) {
-      return const <ProtegoUserSuggestion>[];
+      return const <AegixaUserSuggestion>[];
     }
 
     final rows = await _supabase
@@ -234,7 +234,7 @@ class UsernameService {
     final suggestions = rows
         .whereType<Map<String, dynamic>>()
         .map(
-          (row) => ProtegoUserSuggestion(
+          (row) => AegixaUserSuggestion(
             uid: (row['uid'] ?? '').toString(),
             username: (row['username'] ?? '').toString(),
           ),
@@ -262,7 +262,7 @@ class UsernameService {
 
       return suggestions.map((item) {
         final profile = profileMap[item.uid];
-        return ProtegoUserSuggestion(
+        return AegixaUserSuggestion(
           uid: item.uid,
           username: item.username,
           displayName:
@@ -316,7 +316,7 @@ class UsernameService {
     }
   }
 
-  Future<ProtegoPublicProfile?> getPublicProfileForUserId(String uid) async {
+  Future<AegixaPublicProfile?> getPublicProfileForUserId(String uid) async {
     try {
       final row = await _supabase
           .from('public_profiles')
@@ -327,7 +327,7 @@ class UsernameService {
       if (row == null) {
         return null;
       }
-      return ProtegoPublicProfile(
+      return AegixaPublicProfile(
         uid: (row['uid'] ?? '').toString(),
         username: row['username'] as String?,
         displayName: row['display_name'] as String?,
@@ -345,7 +345,7 @@ class UsernameService {
         if (row == null) {
           return null;
         }
-        return ProtegoPublicProfile(
+        return AegixaPublicProfile(
           uid: (row['uid'] ?? '').toString(),
           username: row['username'] as String?,
           displayName: row['display_name'] as String?,
@@ -411,7 +411,7 @@ class UsernameService {
     final lowered = preferredName.toLowerCase().trim().replaceAll(' ', '_');
     final cleaned = normalizeForInput(lowered);
     if (cleaned.isEmpty) {
-      return 'protego_user';
+      return 'aegixa_user';
     }
     return cleaned.length > 24 ? cleaned.substring(0, 24) : cleaned;
   }

@@ -16,17 +16,17 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
-  runApp(const ProtegoApp());
+  runApp(const AegixaApp());
 }
 
-class ProtegoApp extends StatefulWidget {
-  const ProtegoApp({super.key});
+class AegixaApp extends StatefulWidget {
+  const AegixaApp({super.key});
 
   @override
-  State<ProtegoApp> createState() => _ProtegoAppState();
+  State<AegixaApp> createState() => _AegixaAppState();
 }
 
-class _ProtegoAppState extends State<ProtegoApp> {
+class _AegixaAppState extends State<AegixaApp> {
   static const _themeModePrefsKey = 'theme_mode';
   bool _permissionsReady = false;
   final ValueNotifier<ThemeMode> _themeMode =
@@ -166,7 +166,7 @@ class _ProtegoAppState extends State<ProtegoApp> {
         valueListenable: _themeMode,
         builder: (context, mode, _) {
           return MaterialApp(
-            title: 'Protego',
+            title: 'Aegixa',
             debugShowCheckedModeBanner: false,
             themeMode: mode,
             theme: _buildLightTheme(),

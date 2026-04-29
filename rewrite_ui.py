@@ -12,16 +12,16 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
-  runApp(const ProtegoApp());
+  runApp(const AegixaApp());
 }
 
-class ProtegoApp extends StatelessWidget {
-  const ProtegoApp({super.key});
+class AegixaApp extends StatelessWidget {
+  const AegixaApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Protego',
+      title: 'Aegixa',
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.light,
       theme: ThemeData(
@@ -427,7 +427,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                 const SizedBox(height: 24),
                 const Text('Create account', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Color(0xFF111827), letterSpacing: -1)),
                 const SizedBox(height: 8),
-                const Text('Get started with Protego today.', style: TextStyle(fontSize: 16, color: Color(0xFF6B7280))),
+                const Text('Get started with Aegixa today.', style: TextStyle(fontSize: 16, color: Color(0xFF6B7280))),
                 const SizedBox(height: 40),
                 buildTextField(
                   label: 'Full Name',

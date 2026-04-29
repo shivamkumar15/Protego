@@ -1,10 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:protego/main.dart';
+import 'package:aegixa/main.dart';
 
 void main() {
-  testWidgets('ProtegoApp renders', (WidgetTester tester) async {
-    await tester.pumpWidget(const ProtegoApp());
+  testWidgets('AegixaApp renders', (WidgetTester tester) async {
+    await tester.pumpWidget(const AegixaApp());
     // Basic smoke test — app should render without crashing
-    expect(find.byType(ProtegoApp), findsOneWidget);
+    expect(find.byType(AegixaApp), findsOneWidget);
   });
 }

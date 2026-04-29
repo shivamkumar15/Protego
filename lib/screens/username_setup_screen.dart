@@ -149,7 +149,7 @@ class _UsernameSetupScreenState extends State<UsernameSetupScreen> {
     final email = (widget.user.email ?? '').trim();
     final base = displayName.isNotEmpty
         ? displayName
-        : (email.isNotEmpty ? email.split('@').first : 'protego_user');
+        : (email.isNotEmpty ? email.split('@').first : 'aegixa_user');
     return _service.normalizeForInput(base);
   }
 

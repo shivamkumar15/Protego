@@ -184,10 +184,8 @@ class _SignUpScreenState extends State<SignUpScreen> {
                   children: [
                     Center(
                       child: Image.asset(
-                        isDark
-                            ? 'assets/DarkThemeLogo.png'
-                            : 'assets/LightThemeLogo.png',
-                        height: 96,
+                        'assets/Logo.png',
+                        width: 120,
                       ),
                     ),
                     const SizedBox(height: 18),

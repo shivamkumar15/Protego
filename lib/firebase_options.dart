@@ -56,6 +56,6 @@ class DefaultFirebaseOptions {
     messagingSenderId: '820900289964',
     projectId: 'protego-51833',
     storageBucket: 'protego-51833.firebasestorage.app',
-    iosBundleId: 'com.example.protego',
+    iosBundleId: 'com.example.aegixa',
   );
 }

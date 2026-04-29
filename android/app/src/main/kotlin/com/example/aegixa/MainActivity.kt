@@ -1,4 +1,4 @@
-package com.example.protego
+package com.example.aegixa
 
 import io.flutter.embedding.android.FlutterActivity
 

@@ -22,7 +22,7 @@ Future<bool> showEmergencyContactEditorSheet(
   var isPrimary = contact?.isPrimary ?? suggestPrimary;
   var isSaving = false;
   var checkingUsername = false;
-  var usernameSuggestions = <ProtegoUserSuggestion>[];
+  var usernameSuggestions = <AegixaUserSuggestion>[];
   String? usernameError;
   Timer? usernameDebounce;
 
@@ -42,7 +42,7 @@ Future<bool> showEmergencyContactEditorSheet(
               setModalState(() {
                 checkingUsername = false;
                 usernameError = null;
-                usernameSuggestions = <ProtegoUserSuggestion>[];
+                usernameSuggestions = <AegixaUserSuggestion>[];
               });
               return;
             }
@@ -68,12 +68,12 @@ Future<bool> showEmergencyContactEditorSheet(
               setModalState(() {
                 checkingUsername = false;
                 usernameError = null;
-                usernameSuggestions = <ProtegoUserSuggestion>[];
+                usernameSuggestions = <AegixaUserSuggestion>[];
               });
             }
           }
 
-          ProtegoUserSuggestion? resolveExactUser(String username) {
+          AegixaUserSuggestion? resolveExactUser(String username) {
             for (final item in usernameSuggestions) {
               if (item.username == username) {
                 return item;
@@ -214,7 +214,7 @@ Future<bool> showEmergencyContactEditorSheet(
                           const SizedBox(height: 18),
                           buildTextField(
                             context: sheetContext,
-                            label: 'Protego username',
+                            label: 'Aegixa username',
                             hint: '',
                             controller: usernameController,
                             onChanged: (value) {
@@ -288,11 +288,11 @@ Future<bool> showEmergencyContactEditorSheet(
                                             phoneController.text =
                                                 item.phoneNumber!.trim();
                                           }
-                                          setModalState(() {
-                                            usernameError = null;
-                                            usernameSuggestions =
-                                                <ProtegoUserSuggestion>[];
-                                          });
+                                            setModalState(() {
+                                              usernameError = null;
+                                              usernameSuggestions =
+                                                  <AegixaUserSuggestion>[];
+                                            });
                                         },
                                       ),
                                     )
@@ -462,7 +462,7 @@ Future<bool> showEmergencyContactEditorSheet(
                                           if (matchedUser == null) {
                                             setModalState(() {
                                               usernameError =
-                                                  'Only existing Protego users can be added.';
+                                                  'Only existing Aegixa users can be added.';
                                             });
                                             return;
                                           }
