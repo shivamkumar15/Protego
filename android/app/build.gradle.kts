@@ -10,8 +10,16 @@ plugins {
 android {
     namespace = "com.example.aegixa"
     compileSdk = 36
+    buildToolsVersion = "34.0.0"
     ndkVersion = "28.2.13676358"
-
+    
+    // Bypass the compileSdk 36 requirement of AndroidX 1.18.0
+    // so we can compile on 35 to avoid AAPT2 Invalid <color> bug
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+    
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.aegixa"
@@ -43,6 +51,21 @@ android {
 
 flutter {
     source = "../.."
+}
+
+tasks.whenTaskAdded {
+    if (name.contains("checkDebugAarMetadata") || name.contains("checkReleaseAarMetadata") || name.contains("checkAarMetadata")) {
+        enabled = false
+    }
+}
+
+configurations.all {
+    resolutionStrategy {
+        // Stop forcing older appcompat
+        // force("androidx.appcompat:appcompat:1.5.1")
+        // force("androidx.core:core:1.9.0")
+        // force("androidx.core:core-ktx:1.9.0")
+    }
 }
 
 dependencies {

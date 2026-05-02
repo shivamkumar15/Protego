@@ -286,23 +286,58 @@ class UsernameService {
     String? photoPath,
     String? dateOfBirth,
   }) async {
+    // When the caller passes empty values for photo, phone, or DOB, preserve
+    // whatever is already stored in Supabase so partial updates (e.g. only
+    // changing the photo) don't accidentally wipe unrelated fields.
+    var effectivePhotoPath = (photoPath ?? '').trim();
+    var effectivePhone = (phoneNumber ?? '').trim();
+    var effectiveDob = (dateOfBirth ?? '').trim();
+
+    if (effectivePhotoPath.isEmpty ||
+        effectivePhone.isEmpty ||
+        effectiveDob.isEmpty) {
+      try {
+        final existing = await getPublicProfileForUserId(user.uid);
+        if (existing != null) {
+          if (effectivePhotoPath.isEmpty) {
+            effectivePhotoPath =
+                (existing.profilePhotoPath ?? '').trim();
+          }
+          if (effectivePhone.isEmpty) {
+            effectivePhone = (existing.phoneNumber ?? '').trim();
+          }
+          if (effectiveDob.isEmpty) {
+            effectiveDob = (existing.dateOfBirth ?? '').trim();
+          }
+        }
+      } catch (_) {
+        // Best-effort; proceed with whatever values we have.
+      }
+    }
+
     try {
       await _supabase.from('public_profiles').upsert({
         'uid': user.uid,
         'username': username,
         'display_name': (displayName ?? '').trim(),
-        'phone_number': (phoneNumber ?? '').trim(),
-        'photo_path': (photoPath ?? '').trim(),
-        'date_of_birth': (dateOfBirth ?? '').trim(),
+        'phone_number': effectivePhone,
+        'photo_path': effectivePhotoPath,
+        'date_of_birth': effectiveDob,
       });
     } on PostgrestException catch (error) {
+      // Only drop date_of_birth when the error is specifically about that
+      // column (e.g. column does not exist). Otherwise rethrow immediately.
+      final msg = error.message.toLowerCase();
+      if (!msg.contains('date_of_birth') && !msg.contains('column')) {
+        throw StateError(_publicProfileWriteErrorMessage(error));
+      }
       try {
         await _supabase.from('public_profiles').upsert({
           'uid': user.uid,
           'username': username,
           'display_name': (displayName ?? '').trim(),
-          'phone_number': (phoneNumber ?? '').trim(),
-          'photo_path': (photoPath ?? '').trim(),
+          'phone_number': effectivePhone,
+          'photo_path': effectivePhotoPath,
         });
       } on PostgrestException catch (fallbackError) {
         throw StateError(_publicProfileWriteErrorMessage(fallbackError));

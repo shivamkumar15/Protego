@@ -321,12 +321,34 @@ class _UsernameSetupScreenState extends State<UsernameSetupScreen> {
         );
       }
 
+      // If the profile photo is still a local path (upload failed earlier),
+      // retry the upload before saving the profile.
+      var photoToSave = _profilePhotoPath?.trim() ?? '';
+      if (photoToSave.isNotEmpty && !_isRemotePhoto(photoToSave)) {
+        final retryUrl = await _service.uploadProfilePhoto(
+          user: widget.user,
+          localFilePath: photoToSave,
+        );
+        if ((retryUrl ?? '').trim().isNotEmpty) {
+          photoToSave = retryUrl!.trim();
+          if (mounted) {
+            setState(() {
+              _profilePhotoPath = photoToSave;
+            });
+          }
+        }
+      }
+
       await _service.upsertPublicProfile(
         user: widget.user,
         username: username,
         displayName: widget.user.displayName ?? username,
         phoneNumber: phone,
-        photoPath: _profilePhotoPath,
+        // Pass the remote URL if available; otherwise pass empty string.
+        // upsertPublicProfile will preserve any existing remote URL when
+        // receiving an empty string, so a previously uploaded photo is not
+        // lost on reinstall.
+        photoPath: _isRemotePhoto(photoToSave) ? photoToSave : '',
         dateOfBirth: _selectedDob!.toIso8601String(),
       );
 

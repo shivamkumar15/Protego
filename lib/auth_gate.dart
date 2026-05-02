@@ -17,9 +17,11 @@ class AuthGate extends StatelessWidget {
     if (profile == null) {
       return false;
     }
-    final dob = (profile.dateOfBirth ?? '').trim();
+    // Require only phone number to consider profile complete.
+    // date_of_birth may fail to persist if the column is missing from the
+    // Supabase table, so we must not gate the entire app on it.
     final phone = (profile.phoneNumber ?? '').trim();
-    return dob.isNotEmpty && phone.isNotEmpty;
+    return phone.isNotEmpty;
   }
 
   @override

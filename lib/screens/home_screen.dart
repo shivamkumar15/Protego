@@ -2741,18 +2741,30 @@ class _ProfileTabState extends State<_ProfileTab> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('profile_photo_${widget.user!.uid}', finalPath);
     if ((_username ?? '').trim().isNotEmpty) {
+      final remotePhotoPath = _isRemotePhoto(finalPath) ? finalPath : '';
+      // Only update the photo field; pass null/empty for phone and DOB so
+      // upsertPublicProfile preserves whatever is already stored in Supabase.
       await _usernameService.upsertPublicProfile(
         user: widget.user!,
         username: _username!,
         displayName: widget.user!.displayName,
-        phoneNumber: widget.user!.phoneNumber,
-        photoPath: finalPath,
+        photoPath: remotePhotoPath,
       );
     }
 
     if (!mounted) {
       return;
     }
+    if (!_isRemotePhoto(finalPath)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Photo saved on this device only. Check internet and try again to sync it.',
+          ),
+        ),
+      );
+    }
+
     setState(() {
       _profilePhotoPath = finalPath;
     });
