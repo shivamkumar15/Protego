@@ -1,18 +1,18 @@
-# Aegixa 🛡️
+# Aegixa
 
 **Aegixa** (formerly Protego) is a powerful, personal safety guardian application built with Flutter. It provides real-time SOS alerts, emergency contact management, and location tracking to ensure you are never alone in an emergency.
 
-## ✨ Features
+## Features
 
-- 🚨 **One-Tap SOS**: Instantly trigger an emergency alert to your designated contacts.
-- 📍 **Live Location Tracking**: Share your precise coordinates with your guardians in real-time.
-- 📞 **Emergency Contacts**: Manage and quickly reach out to your trusted network.
-- 🎙️ **SOS Recordings**: Automatically record audio during an SOS event for evidence and situational awareness.
-- 🔐 **Secure Authentication**: Robust login and signup system using Firebase Auth (Phone and Email support).
-- 🌓 **Dynamic Themes**: Beautiful Light and Dark modes for better accessibility.
-- 🌍 **Integrated Maps**: View your surroundings and locate emergency services easily.
+- **One-Tap SOS**: Instantly trigger an emergency alert to your designated contacts.
+- **Live Location Tracking**: Share your precise coordinates with your guardians in real-time.
+- **Emergency Contacts**: Manage and quickly reach out to your trusted network.
+- **SOS Recordings**: Automatically record audio during an SOS event for evidence and situational awareness.
+- **Secure Authentication**: Robust login and signup system using Firebase Auth (Phone and Email support).
+- **Dynamic Themes**: Beautiful Light and Dark modes for better accessibility.
+- **Integrated Maps**: View your surroundings and locate emergency services easily.
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -47,14 +47,14 @@
     flutter run
     ```
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 - **Frontend**: Flutter / Dart
 - **Backend/Auth**: Firebase & Supabase
 - **Database**: Supabase / Sqflite (Local)
 - **Maps**: Flutter Map / Geolocator
 
-## 📂 Project Structure
+## Project Structure
 
 - `lib/screens`: All UI screens (Home, Login, SOS, etc.)
 - `lib/services`: Backend and utility services.
@@ -62,4 +62,4 @@
 
 ---
 
-Built with ❤️ for personal safety.
+Built for personal safety.
