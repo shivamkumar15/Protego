@@ -1,6 +1,6 @@
 # Aegixa
 
-**Aegixa** (formerly Protego) is a powerful, personal safety guardian application built with Flutter. It provides real-time SOS alerts, emergency contact management, and location tracking to ensure you are never alone in an emergency.
+**Aegixa** is a powerful, personal safety guardian application built with Flutter. It provides real-time SOS alerts, emergency contact management, and location tracking to ensure you are never alone in an emergency.
 
 ## Features
 
