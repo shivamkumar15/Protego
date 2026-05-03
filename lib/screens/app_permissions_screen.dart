@@ -1,14 +1,21 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:flutter_overlay_window/flutter_overlay_window.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'battery_optimization_guide_screen.dart';
+import '../services/device_settings_service.dart';
 
 class AppPermissionsScreen extends StatefulWidget {
   const AppPermissionsScreen({super.key, required this.onCompleted});
 
   final VoidCallback onCompleted;
 
-  static const permissionsPrefsKey = 'app_permissions_completed_v1';
+  static const permissionsPrefsKey = 'app_permissions_completed_v2';
 
   @override
   State<AppPermissionsScreen> createState() => _AppPermissionsScreenState();
@@ -21,6 +28,9 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
   bool _isSubmitting = false;
   bool _locationGranted = false;
   bool _micGranted = false;
+  bool _cameraGranted = false;
+  bool _notificationsGranted = false;
+  bool _overlayGranted = false;
   bool _locationServiceEnabled = false;
 
   @override
@@ -48,6 +58,9 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
     final locationServiceEnabled = await Geolocator.isLocationServiceEnabled();
     final locationPermission = await Geolocator.checkPermission();
     final micGranted = await _safeMicPermissionCheck();
+    final cameraGranted = await Permission.camera.isGranted;
+    final notificationsGranted = await _isNotificationPermissionGranted();
+    final overlayGranted = await _isOverlayPermissionGranted();
 
     if (!mounted) {
       return;
@@ -58,13 +71,24 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
       _locationGranted = locationPermission == LocationPermission.always ||
           locationPermission == LocationPermission.whileInUse;
       _micGranted = micGranted;
+      _cameraGranted = cameraGranted;
+      _notificationsGranted = notificationsGranted;
+      _overlayGranted = overlayGranted;
       _isChecking = false;
     });
 
-    if (_locationServiceEnabled && _locationGranted && _micGranted) {
+    if (_hasAllRequiredPermissions) {
       await _markComplete();
     }
   }
+
+  bool get _hasAllRequiredPermissions =>
+      _locationServiceEnabled &&
+      _locationGranted &&
+      _micGranted &&
+      _cameraGranted &&
+      _notificationsGranted &&
+      _overlayGranted;
 
   Future<void> _markComplete() async {
     final prefs = await SharedPreferences.getInstance();
@@ -99,7 +123,23 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
 
       final micGranted = await _safeMicPermissionCheck();
       if (!micGranted) {
-        await Geolocator.openAppSettings();
+        await Permission.microphone.request();
+      }
+
+      final cameraStatus = await Permission.camera.request();
+      if (cameraStatus.isPermanentlyDenied) {
+        await openAppSettings();
+      }
+
+      final notificationStatus = await Permission.notification.request();
+      if (notificationStatus.isPermanentlyDenied) {
+        await openAppSettings();
+      }
+
+      if (!await _isOverlayPermissionGranted()) {
+        if (Platform.isAndroid) {
+          await FlutterOverlayWindow.requestPermission();
+        }
       }
 
       await _refreshPermissionState();
@@ -108,13 +148,12 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
         return;
       }
 
-      final allGranted =
-          _locationServiceEnabled && _locationGranted && _micGranted;
+      final allGranted = _hasAllRequiredPermissions;
       if (!allGranted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
-              'Please allow location, microphone, and keep location services on to continue.',
+              'Please allow location, microphone, camera, notifications, overlay access, and keep location services on to continue.',
             ),
           ),
         );
@@ -136,6 +175,22 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
     }
   }
 
+  Future<bool> _isNotificationPermissionGranted() async {
+    final status = await Permission.notification.status;
+    return status.isGranted || status.isLimited || status.isProvisional;
+  }
+
+  Future<bool> _isOverlayPermissionGranted() async {
+    if (!Platform.isAndroid) {
+      return true;
+    }
+    final status = await Permission.systemAlertWindow.status;
+    if (status.isGranted) {
+      return true;
+    }
+    return FlutterOverlayWindow.isPermissionGranted();
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -152,8 +207,7 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
                     color: theme.colorScheme.primary,
                   ),
                 )
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              : ListView(
                   children: [
                     Container(
                       width: 68,
@@ -180,7 +234,7 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
                     ),
                     const SizedBox(height: 10),
                     Text(
-                      'Aegixa needs location and microphone access from the start so SOS, live tracking, and emergency evidence work instantly.',
+                      'Aegixa needs location, microphone, camera, notification, and overlay access from the start so SOS, live tracking, emergency evidence, and panic alerts work instantly.',
                       style: TextStyle(
                         fontSize: 15,
                         height: 1.5,
@@ -189,6 +243,67 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
                             : const Color(0xFF6B7280),
                       ),
                     ),
+                    if (Platform.isAndroid) ...[
+                      const SizedBox(height: 18),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color:
+                              theme.colorScheme.primary.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(
+                            color: theme.colorScheme.primary
+                                .withValues(alpha: 0.22),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Battery optimization can block emergency alerts',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                color: theme.colorScheme.onSurface,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'On many Android phones, panic notifications can be delayed unless Aegixa is excluded from battery optimization.',
+                              style: TextStyle(
+                                height: 1.45,
+                                color: isDark
+                                    ? const Color(0xFFD4D4D8)
+                                    : const Color(0xFF4B5563),
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            OutlinedButton.icon(
+                              onPressed: () async {
+                                await DeviceSettingsService
+                                    .openBatteryOptimizationSettings();
+                              },
+                              icon: const Icon(Icons.battery_alert_outlined),
+                              label: const Text('Open battery settings'),
+                            ),
+                            const SizedBox(height: 10),
+                            TextButton(
+                              onPressed: () {
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (_) =>
+                                        const BatteryOptimizationGuideScreen(),
+                                  ),
+                                );
+                              },
+                              child: const Text(
+                                'View brand-specific instructions',
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 26),
                     _PermissionStatusTile(
                       icon: Icons.location_on_outlined,
@@ -206,7 +321,31 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
                           'Required to record audio automatically during SOS.',
                       isGranted: _micGranted,
                     ),
-                    const Spacer(),
+                    const SizedBox(height: 12),
+                    _PermissionStatusTile(
+                      icon: Icons.videocam_outlined,
+                      title: 'Camera access',
+                      subtitle:
+                          'Required for SOS video capture and emergency evidence.',
+                      isGranted: _cameraGranted,
+                    ),
+                    const SizedBox(height: 12),
+                    _PermissionStatusTile(
+                      icon: Icons.notifications_active_outlined,
+                      title: 'Notification access',
+                      subtitle:
+                          'Required so incoming SOS alerts can break through immediately.',
+                      isGranted: _notificationsGranted,
+                    ),
+                    const SizedBox(height: 12),
+                    _PermissionStatusTile(
+                      icon: Icons.picture_in_picture_alt_outlined,
+                      title: 'Overlay access',
+                      subtitle:
+                          'Required on Android to show panic alerts on top of other apps.',
+                      isGranted: _overlayGranted,
+                    ),
+                    const SizedBox(height: 20),
                     Container(
                       width: double.infinity,
                       padding: const EdgeInsets.all(16),
@@ -222,7 +361,7 @@ class _AppPermissionsScreenState extends State<AppPermissionsScreen>
                         ),
                       ),
                       child: Text(
-                        'You only need to do this once after installation. If you deny a permission permanently, Aegixa will open app settings so you can enable it.',
+                        'You only need to do this once after installation. If you deny a permission permanently, Aegixa will open app settings so you can enable it. On Android, also disable battery optimization for the most reliable emergency alerts.',
                         style: TextStyle(
                           color: isDark
                               ? const Color(0xFFA3A3A3)

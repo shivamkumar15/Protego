@@ -10,6 +10,8 @@ Future<bool> showEmergencyContactEditorSheet(
   BuildContext context, {
   EmergencyContact? contact,
   bool suggestPrimary = false,
+  String? currentUserUid,
+  List<EmergencyContact> existingContacts = const [],
   required Future<void> Function(EmergencyContact contact) onSave,
 }) async {
   final formKey = GlobalKey<FormState>();
@@ -23,6 +25,7 @@ Future<bool> showEmergencyContactEditorSheet(
   var isSaving = false;
   var checkingUsername = false;
   var usernameSuggestions = <AegixaUserSuggestion>[];
+  AegixaUserSuggestion? selectedUser;
   String? usernameError;
   Timer? usernameDebounce;
 
@@ -56,10 +59,28 @@ Future<bool> showEmergencyContactEditorSheet(
               if (!sheetContext.mounted) {
                 return;
               }
+
+              // Filter out the current user and already-added contacts.
+              final editingId = contact?.id;
+              final existingUsernames = existingContacts
+                  .where((c) => c.id != editingId)
+                  .map((c) => (c.username ?? '').trim())
+                  .where((u) => u.isNotEmpty)
+                  .toSet();
+              final filtered = results.where((item) {
+                if (currentUserUid != null && item.uid == currentUserUid) {
+                  return false;
+                }
+                if (existingUsernames.contains(item.username)) {
+                  return false;
+                }
+                return true;
+              }).toList();
+
               setModalState(() {
                 checkingUsername = false;
                 usernameError = null;
-                usernameSuggestions = results;
+                usernameSuggestions = filtered;
               });
             } catch (_) {
               if (!sheetContext.mounted) {
@@ -166,52 +187,12 @@ Future<bool> showEmergencyContactEditorSheet(
                                         color: theme.colorScheme.onSurface,
                                       ),
                                     ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      'Save someone you can reach quickly during an emergency.',
-                                      style: TextStyle(
-                                        color: isDark
-                                            ? const Color(0xFFA3A3A3)
-                                            : const Color(0xFF6B7280),
-                                        fontSize: 13,
-                                      ),
-                                    ),
                                   ],
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 18),
-                          Container(
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: theme.colorScheme.primary
-                                  .withValues(alpha: 0.08),
-                              borderRadius: BorderRadius.circular(18),
-                            ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Icon(
-                                  Icons.info_outline,
-                                  color: theme.colorScheme.primary,
-                                  size: 18,
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    'Tip: add a close family member first and mark them as primary.',
-                                    style: TextStyle(
-                                      color: theme.colorScheme.onSurface,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 18),
+                          const SizedBox(height: 24),
                           buildTextField(
                             context: sheetContext,
                             label: 'Aegixa username',
@@ -220,6 +201,7 @@ Future<bool> showEmergencyContactEditorSheet(
                             onChanged: (value) {
                               setModalState(() {
                                 usernameError = null;
+                                selectedUser = null;
                               });
                               usernameDebounce?.cancel();
                               usernameDebounce =
@@ -288,11 +270,12 @@ Future<bool> showEmergencyContactEditorSheet(
                                             phoneController.text =
                                                 item.phoneNumber!.trim();
                                           }
-                                            setModalState(() {
-                                              usernameError = null;
-                                              usernameSuggestions =
-                                                  <AegixaUserSuggestion>[];
-                                            });
+                                          setModalState(() {
+                                            selectedUser = item;
+                                            usernameError = null;
+                                            usernameSuggestions =
+                                                <AegixaUserSuggestion>[];
+                                          });
                                         },
                                       ),
                                     )
@@ -386,15 +369,6 @@ Future<bool> showEmergencyContactEditorSheet(
                                           fontWeight: FontWeight.w700,
                                         ),
                                       ),
-                                      Text(
-                                        'This person will appear first in your emergency list.',
-                                        style: TextStyle(
-                                          color: isDark
-                                              ? const Color(0xFFA3A3A3)
-                                              : const Color(0xFF6B7280),
-                                          fontSize: 12,
-                                        ),
-                                      ),
                                     ],
                                   ),
                                 ),
@@ -440,8 +414,14 @@ Future<bool> showEmergencyContactEditorSheet(
                                               usernameService.normalizeForInput(
                                                   usernameController.text
                                                       .trim());
-                                          var matchedUser = resolveExactUser(
-                                              normalizedUsername);
+
+                                          var matchedUser = (selectedUser
+                                                          ?.username ==
+                                                      normalizedUsername)
+                                              ? selectedUser
+                                              : resolveExactUser(
+                                                  normalizedUsername);
+
                                           if (matchedUser == null) {
                                             final remoteSuggestions =
                                                 await usernameService
@@ -465,6 +445,54 @@ Future<bool> showEmergencyContactEditorSheet(
                                                   'Only existing Aegixa users can be added.';
                                             });
                                             return;
+                                          }
+
+                                          // Prevent adding yourself
+                                          if (currentUserUid != null &&
+                                              matchedUser.uid ==
+                                                  currentUserUid) {
+                                            setModalState(() {
+                                              usernameError =
+                                                  'You cannot add yourself as an emergency contact.';
+                                            });
+                                            return;
+                                          }
+
+                                          // Prevent duplicate contacts
+                                          final editingId = contact?.id;
+                                          final isDuplicate =
+                                              existingContacts.any((c) =>
+                                                  c.id != editingId &&
+                                                  (c.username ?? '').trim() ==
+                                                      normalizedUsername);
+                                          if (isDuplicate) {
+                                            setModalState(() {
+                                              usernameError =
+                                                  'This user is already in your emergency contacts.';
+                                            });
+                                            return;
+                                          }
+
+                                          // Ensure we have the profile photo.
+                                          // searchUsers enrichment can silently
+                                          // fail, so always do a direct lookup
+                                          // from public_profiles if photo is
+                                          // missing.
+                                          var contactPhotoPath =
+                                              (matchedUser.profilePhotoPath ??
+                                                      '')
+                                                  .trim();
+                                          if (contactPhotoPath.isEmpty) {
+                                            try {
+                                              final profile =
+                                                  await usernameService
+                                                      .getPublicProfileForUsername(
+                                                          normalizedUsername);
+                                              contactPhotoPath =
+                                                  (profile?.profilePhotoPath ??
+                                                          '')
+                                                      .trim();
+                                            } catch (_) {}
                                           }
 
                                           if (nameController.text
@@ -505,8 +533,10 @@ Future<bool> showEmergencyContactEditorSheet(
                                                 phoneNumber:
                                                     phoneController.text.trim(),
                                                 username: normalizedUsername,
-                                                profilePhotoPath: matchedUser
-                                                    .profilePhotoPath,
+                                                profilePhotoPath:
+                                                    contactPhotoPath.isEmpty
+                                                        ? null
+                                                        : contactPhotoPath,
                                                 isPrimary: isPrimary,
                                               ),
                                             );

@@ -1,3 +1,4 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -41,6 +42,8 @@ class _EmergencyContactsSetupScreenState
       context,
       contact: contact,
       suggestPrimary: _contacts.isEmpty,
+      currentUserUid: FirebaseAuth.instance.currentUser?.uid,
+      existingContacts: _contacts,
       onSave: _service.saveContact,
     );
     if (!mounted || !didSave) return;

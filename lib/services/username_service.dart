@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide User;
 
@@ -393,30 +394,70 @@ class UsernameService {
     }
   }
 
+  /// Look up a public profile by username (not uid).
+  /// Returns the full profile including photo_path.
+  Future<AegixaPublicProfile?> getPublicProfileForUsername(
+      String username) async {
+    try {
+      final row = await _supabase
+          .from('public_profiles')
+          .select(
+              'uid,username,display_name,phone_number,photo_path,date_of_birth')
+          .eq('username', username)
+          .maybeSingle();
+      if (row == null) {
+        return null;
+      }
+      return AegixaPublicProfile(
+        uid: (row['uid'] ?? '').toString(),
+        username: row['username'] as String?,
+        displayName: row['display_name'] as String?,
+        phoneNumber: row['phone_number'] as String?,
+        profilePhotoPath: row['photo_path'] as String?,
+        dateOfBirth: row['date_of_birth'] as String?,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Uploads a profile photo to Supabase Storage and returns the public URL.
+  ///
+  /// Returns `null` only when the local file does not exist.
+  /// Throws on any storage/network error so callers can decide how to handle
+  /// the failure instead of silently losing the photo URL.
   Future<String?> uploadProfilePhoto({
     required User user,
     required String localFilePath,
   }) async {
+    final file = File(localFilePath);
+    if (!file.existsSync()) {
+      debugPrint('[uploadProfilePhoto] File does not exist: $localFilePath');
+      return null;
+    }
+
+    final bytes = await file.readAsBytes();
+    final extension = _safeImageExtension(localFilePath);
+    final objectPath = '${user.uid}/profile.$extension';
+
+    debugPrint('[uploadProfilePhoto] Uploading ${bytes.length} bytes '
+        'to bucket "profile-photos", path "$objectPath"');
+
     try {
-      final file = File(localFilePath);
-      if (!file.existsSync()) {
-        return null;
-      }
-
-      final bytes = await file.readAsBytes();
-      final extension = _safeImageExtension(localFilePath);
-      final objectPath = '${user.uid}/profile.$extension';
-
       await _supabase.storage.from('profile-photos').uploadBinary(
             objectPath,
             bytes,
             fileOptions: const FileOptions(upsert: true),
           );
-
-      return _supabase.storage.from('profile-photos').getPublicUrl(objectPath);
-    } catch (_) {
-      return null;
+    } catch (e) {
+      debugPrint('[uploadProfilePhoto] Storage upload FAILED: $e');
+      rethrow;
     }
+
+    final url =
+        _supabase.storage.from('profile-photos').getPublicUrl(objectPath);
+    debugPrint('[uploadProfilePhoto] Success! Public URL: $url');
+    return url;
   }
 
   Future<bool> _tryReserveUsername({

@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide User;
 import 'auth_gate.dart';
 import 'firebase_options.dart';
+import 'screens/panic_overlay_screen.dart';
 import 'theme_mode_scope.dart';
 import 'screens/app_permissions_screen.dart';
+import 'services/push_notification_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,7 +19,25 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+  FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
   runApp(const AegixaApp());
+}
+
+@pragma('vm:entry-point')
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  WidgetsFlutterBinding.ensureInitialized();
+  if (Firebase.apps.isEmpty) {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  }
+  await PushNotificationService.handleBackgroundMessage(message);
+}
+
+@pragma('vm:entry-point')
+void overlayMain() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const PanicOverlayApp());
 }
 
 class AegixaApp extends StatefulWidget {
@@ -28,6 +49,7 @@ class AegixaApp extends StatefulWidget {
 
 class _AegixaAppState extends State<AegixaApp> {
   static const _themeModePrefsKey = 'theme_mode';
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
   bool _permissionsReady = false;
   final ValueNotifier<ThemeMode> _themeMode =
       ValueNotifier<ThemeMode>(ThemeMode.system);
@@ -37,6 +59,9 @@ class _AegixaAppState extends State<AegixaApp> {
     super.initState();
     _loadStartupState();
     _themeMode.addListener(_persistThemeMode);
+    if (Firebase.apps.isNotEmpty) {
+      PushNotificationService().initialize(_navigatorKey);
+    }
   }
 
   Future<void> _loadStartupState() async {
@@ -168,6 +193,7 @@ class _AegixaAppState extends State<AegixaApp> {
           return MaterialApp(
             title: 'Aegixa',
             debugShowCheckedModeBanner: false,
+            navigatorKey: _navigatorKey,
             themeMode: mode,
             theme: _buildLightTheme(),
             darkTheme: _buildDarkTheme(),

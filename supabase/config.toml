@@ -1,0 +1,2 @@
+[functions.send-sos-push]
+verify_jwt = false

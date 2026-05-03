@@ -325,30 +325,33 @@ class _UsernameSetupScreenState extends State<UsernameSetupScreen> {
       // retry the upload before saving the profile.
       var photoToSave = _profilePhotoPath?.trim() ?? '';
       if (photoToSave.isNotEmpty && !_isRemotePhoto(photoToSave)) {
-        final retryUrl = await _service.uploadProfilePhoto(
-          user: widget.user,
-          localFilePath: photoToSave,
-        );
-        if ((retryUrl ?? '').trim().isNotEmpty) {
-          photoToSave = retryUrl!.trim();
-          if (mounted) {
-            setState(() {
-              _profilePhotoPath = photoToSave;
-            });
+        try {
+          final retryUrl = await _service.uploadProfilePhoto(
+            user: widget.user,
+            localFilePath: photoToSave,
+          );
+          if ((retryUrl ?? '').trim().isNotEmpty) {
+            photoToSave = retryUrl!.trim();
+            if (mounted) {
+              setState(() {
+                _profilePhotoPath = photoToSave;
+              });
+            }
           }
+        } catch (_) {
+          // Upload failed – keep local path, don't block profile save.
         }
       }
 
+      // Only write photo_path to Supabase when we have a remote URL.
+      // Pass null when upload failed so upsertPublicProfile preserves any
+      // existing remote URL instead of overwriting it with an empty string.
       await _service.upsertPublicProfile(
         user: widget.user,
         username: username,
         displayName: widget.user.displayName ?? username,
         phoneNumber: phone,
-        // Pass the remote URL if available; otherwise pass empty string.
-        // upsertPublicProfile will preserve any existing remote URL when
-        // receiving an empty string, so a previously uploaded photo is not
-        // lost on reinstall.
-        photoPath: _isRemotePhoto(photoToSave) ? photoToSave : '',
+        photoPath: _isRemotePhoto(photoToSave) ? photoToSave : null,
         dateOfBirth: _selectedDob!.toIso8601String(),
       );
 
@@ -441,12 +444,16 @@ class _UsernameSetupScreenState extends State<UsernameSetupScreen> {
     final savedFile = await File(picked.path).copy(targetPath);
 
     var finalPath = savedFile.path;
-    final uploadedUrl = await _service.uploadProfilePhoto(
-      user: widget.user,
-      localFilePath: savedFile.path,
-    );
-    if ((uploadedUrl ?? '').trim().isNotEmpty) {
-      finalPath = uploadedUrl!.trim();
+    try {
+      final uploadedUrl = await _service.uploadProfilePhoto(
+        user: widget.user,
+        localFilePath: savedFile.path,
+      );
+      if ((uploadedUrl ?? '').trim().isNotEmpty) {
+        finalPath = uploadedUrl!.trim();
+      }
+    } catch (_) {
+      // Upload failed – keep local path for now; will retry on save.
     }
 
     if (!mounted) {

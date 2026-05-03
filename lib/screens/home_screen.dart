@@ -17,12 +17,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/auth_service.dart';
+import '../services/device_settings_service.dart';
 import '../services/emergency_contacts_service.dart';
+import '../services/sos_alert_service.dart';
 import '../services/sos_recording_service.dart';
 import '../services/username_service.dart';
 import '../theme_mode_scope.dart';
 import '../auth_gate.dart';
 import 'emergency_contact_editor_sheet.dart';
+import 'battery_optimization_guide_screen.dart';
+import 'sos_alerts_screen.dart';
 import 'sos_recordings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -42,15 +46,20 @@ class _HomeScreenState extends State<HomeScreen> {
 
   late int _currentIndex;
   final SosRecordingService _sosRecordingService = SosRecordingService();
+  final SosAlertService _sosAlertService = SosAlertService();
   bool _isSosActive = false;
   String? _activeSosRecordingPath;
   String? _activeSosVideoPath;
+  String? _activeSosSessionId;
   bool _autoVideoRecord = false;
   bool _autoVoiceRecord = true;
   bool _vibrationOnSos = true;
   int _sosHoldDuration = 2;
   String? _navProfilePhotoPath;
   DateTime? _lastBackPressedAt;
+  StreamSubscription<Position>? _sosLocationSubscription;
+  Position? _lastSharedSosPosition;
+  DateTime? _lastSharedSosAt;
 
   static const _titles = <String>[
     'Home',
@@ -90,27 +99,50 @@ class _HomeScreenState extends State<HomeScreen> {
     _loadNavProfilePhoto();
   }
 
+  @override
+  void dispose() {
+    _sosLocationSubscription?.cancel();
+    _sosRecordingService.disposeRecorder();
+    super.dispose();
+  }
+
   Future<void> _loadNavProfilePhoto() async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) {
       return;
     }
-    final remoteProfile =
-        await UsernameService().getPublicProfileForUserId(uid);
+
     final prefs = await SharedPreferences.getInstance();
-    final path = (remoteProfile?.profilePhotoPath ??
-            prefs.getString('profile_photo_$uid') ??
-            '')
-        .trim();
-    if (path.isNotEmpty) {
-      await prefs.setString('profile_photo_$uid', path);
+
+    // Show cached photo immediately while we fetch the remote one.
+    final cachedPath = (prefs.getString('profile_photo_$uid') ?? '').trim();
+    if (cachedPath.isNotEmpty && mounted) {
+      setState(() {
+        _navProfilePhotoPath = cachedPath;
+      });
     }
-    if (!mounted) {
-      return;
+
+    // Then try to fetch the remote profile photo in background.
+    try {
+      final remoteProfile =
+          await UsernameService().getPublicProfileForUserId(uid);
+      final remotePath = (remoteProfile?.profilePhotoPath ?? '').trim();
+
+      // Use remote path if available, otherwise keep the cached local path.
+      final resolvedPath = remotePath.isNotEmpty ? remotePath : cachedPath;
+
+      if (resolvedPath.isNotEmpty) {
+        await prefs.setString('profile_photo_$uid', resolvedPath);
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _navProfilePhotoPath = resolvedPath.isEmpty ? null : resolvedPath;
+      });
+    } catch (_) {
+      // Network error — keep using the cached photo (already set above).
     }
-    setState(() {
-      _navProfilePhotoPath = path.isEmpty ? null : path;
-    });
   }
 
   Future<void> _loadSosPreferences() async {
@@ -137,17 +169,36 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _handleSosActivated() async {
     try {
+      final contacts = await EmergencyContactsService().getContacts();
+      if (contacts.isEmpty) {
+        throw StateError(
+            'Add at least one emergency contact before using SOS.');
+      }
+
+      final initialPosition = await _getSosPosition();
+      final dispatch = await _sosAlertService.triggerAlerts(
+        contacts: contacts,
+        position: initialPosition,
+        alertMessage: _buildSosAlertMessage(),
+      );
+
+      final shouldRecordVoice = _autoVoiceRecord || dispatch.deliveredCount > 0;
+      final shouldRecordVideo = _autoVideoRecord || dispatch.deliveredCount > 0;
       String? recordingPath;
       String? videoPath;
       if (_vibrationOnSos) {
         HapticFeedback.heavyImpact();
       }
 
-      if (_autoVoiceRecord) {
-        recordingPath = await _sosRecordingService.startRecording();
+      if (shouldRecordVoice) {
+        try {
+          recordingPath = await _sosRecordingService.startRecording();
+        } catch (_) {
+          recordingPath = null;
+        }
       }
 
-      if (_autoVideoRecord) {
+      if (shouldRecordVideo) {
         try {
           await _sosRecordingService.startAutoVideoRecording();
           videoPath = 'Background video recording active';
@@ -163,13 +214,23 @@ class _HomeScreenState extends State<HomeScreen> {
         _isSosActive = true;
         _activeSosRecordingPath = recordingPath;
         _activeSosVideoPath = videoPath;
+        _activeSosSessionId = dispatch.sessionId;
       });
+      await _startSosLocationSharing(dispatch.sessionId, initialPosition);
+      if (!mounted) {
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            (_autoVoiceRecord || _autoVideoRecord)
-                ? 'Help is on the way. SOS recording started.'
-                : 'Help is on the way. SOS activated.',
+            _buildSosActivatedMessage(
+              deliveredCount: dispatch.deliveredCount,
+              skippedCount: dispatch.skippedCount,
+              recordingStarted: recordingPath != null || shouldRecordVideo,
+              pushDeliveredCount: dispatch.pushDeliveredCount,
+              pushSkippedCount: dispatch.pushSkippedCount,
+              pushErrorMessage: dispatch.pushErrorMessage,
+            ),
           ),
           backgroundColor: Colors.red,
         ),
@@ -188,8 +249,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _stopSos() async {
-    final recordingPath =
-        _autoVoiceRecord ? await _sosRecordingService.stopRecording() : null;
+    await _sosLocationSubscription?.cancel();
+    _sosLocationSubscription = null;
+
+    final recordingPath = _sosRecordingService.isRecordingActive
+        ? await _sosRecordingService.stopRecording()
+        : null;
     String? videoPath;
     if (_autoVideoRecord) {
       try {
@@ -200,6 +265,14 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     final savedPath = recordingPath ?? _activeSosRecordingPath;
     final savedVideo = videoPath ?? _activeSosVideoPath;
+    final activeSessionId = _activeSosSessionId;
+    if (activeSessionId != null) {
+      await _sosAlertService.resolveAlertSession(
+        sessionId: activeSessionId,
+        voiceRecordingPath: savedPath,
+        videoRecordingPath: savedVideo,
+      );
+    }
     if (!mounted) {
       return;
     }
@@ -207,6 +280,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _isSosActive = false;
       _activeSosRecordingPath = savedPath;
       _activeSosVideoPath = savedVideo;
+      _activeSosSessionId = null;
     });
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -215,6 +289,107 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       ),
     );
+  }
+
+  String _buildSosAlertMessage() {
+    final user = FirebaseAuth.instance.currentUser;
+    final name = (user?.displayName ?? '').trim();
+    final email = (user?.email ?? '').trim();
+    final label = name.isNotEmpty
+        ? name
+        : (email.isNotEmpty ? email.split('@').first : 'Aegixa user');
+    return 'PANIC ALERT: $label may be in immediate danger. Emergency SOS has been triggered and live location sharing is active. Respond now.';
+  }
+
+  String _buildSosActivatedMessage({
+    required int deliveredCount,
+    required int skippedCount,
+    required bool recordingStarted,
+    required int pushDeliveredCount,
+    required int pushSkippedCount,
+    String? pushErrorMessage,
+  }) {
+    final recordingMessage = recordingStarted
+        ? ' Emergency voice and video capture started for your contacts.'
+        : '';
+    final pushMessage = (pushErrorMessage ?? '').trim().isNotEmpty
+        ? ' ${pushErrorMessage!.trim()}'
+        : pushDeliveredCount > 0
+            ? ' Panic notifications reached $pushDeliveredCount device${pushDeliveredCount == 1 ? '' : 's'}.'
+            : pushSkippedCount > 0
+                ? ' Some contacts have not opened Aegixa with notifications enabled yet, so panic push could not reach $pushSkippedCount device${pushSkippedCount == 1 ? '' : 's'}.'
+                : '';
+    if (skippedCount > 0) {
+      return 'SOS sent to $deliveredCount contact${deliveredCount == 1 ? '' : 's'} in-app. $skippedCount contact${skippedCount == 1 ? ' is' : 's are'} not linked to Aegixa yet.$recordingMessage$pushMessage';
+    }
+    return 'SOS sent to $deliveredCount contact${deliveredCount == 1 ? '' : 's'} in-app.$recordingMessage$pushMessage';
+  }
+
+  Future<Position> _getSosPosition() async {
+    final cached = await Geolocator.getLastKnownPosition();
+    try {
+      return await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 8),
+        ),
+      );
+    } catch (_) {
+      if (cached != null) {
+        return cached;
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _startSosLocationSharing(
+    String sessionId,
+    Position initialPosition,
+  ) async {
+    _lastSharedSosPosition = initialPosition;
+    _lastSharedSosAt = DateTime.now();
+    await _sosLocationSubscription?.cancel();
+    _sosLocationSubscription = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 8,
+      ),
+    ).listen((position) async {
+      if (!position.latitude.isFinite || !position.longitude.isFinite) {
+        return;
+      }
+      if (!_shouldPushSosLocation(position)) {
+        return;
+      }
+
+      try {
+        await _sosAlertService.updateLiveLocation(
+          sessionId: sessionId,
+          position: position,
+        );
+        _lastSharedSosPosition = position;
+        _lastSharedSosAt = DateTime.now();
+      } catch (_) {
+        // Keep SOS locally active even if a background sync fails.
+      }
+    });
+  }
+
+  bool _shouldPushSosLocation(Position nextPosition) {
+    final lastPosition = _lastSharedSosPosition;
+    final lastSharedAt = _lastSharedSosAt;
+    if (lastPosition == null || lastSharedAt == null) {
+      return true;
+    }
+
+    final movedDistance = Geolocator.distanceBetween(
+      lastPosition.latitude,
+      lastPosition.longitude,
+      nextPosition.latitude,
+      nextPosition.longitude,
+    );
+    final elapsed = DateTime.now().difference(lastSharedAt);
+    return movedDistance >= 15 || elapsed >= const Duration(seconds: 15);
   }
 
   String _buildStopSosMessage(String? audioPath, String? videoPath) {
@@ -285,27 +460,18 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           actions: [
-            if (_currentIndex == 3)
-              PopupMenuButton<ThemeMode>(
-                tooltip: 'Theme mode',
-                icon: Icon(Icons.palette_outlined,
-                    color: theme.colorScheme.onSurface),
-                onSelected: (mode) => themeModeController.value = mode,
-                itemBuilder: (context) => [
-                  const PopupMenuItem<ThemeMode>(
-                    value: ThemeMode.system,
-                    child: Text('System'),
-                  ),
-                  const PopupMenuItem<ThemeMode>(
-                    value: ThemeMode.light,
-                    child: Text('Light'),
-                  ),
-                  const PopupMenuItem<ThemeMode>(
-                    value: ThemeMode.dark,
-                    child: Text('Dark'),
-                  ),
-                ],
+            IconButton(
+              tooltip: 'SOS inbox',
+              icon: Icon(
+                Icons.notification_important_outlined,
+                color: theme.colorScheme.onSurface,
               ),
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const SosAlertsScreen()),
+                );
+              },
+            ),
           ],
           bottom: PreferredSize(
             preferredSize: const Size.fromHeight(1),
@@ -343,11 +509,19 @@ class _HomeScreenState extends State<HomeScreen> {
               onOpenEmergencyContacts: () {
                 setState(() => _currentIndex = 2);
               },
+              onOpenSosInbox: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const SosAlertsScreen()),
+                );
+              },
               onLogout: authService.signOut,
               autoVideoRecord: _autoVideoRecord,
               autoVoiceRecord: _autoVoiceRecord,
               vibrationOnSos: _vibrationOnSos,
               holdDuration: _sosHoldDuration,
+              onOpenBatteryOptimizationSettings: () {
+                return DeviceSettingsService.openBatteryOptimizationSettings();
+              },
               onAutoVideoRecordChanged: (value) {
                 setState(() => _autoVideoRecord = value);
                 _saveBoolPreference(_autoVideoRecordKey, value);
@@ -1218,6 +1392,10 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
   bool _isRequestingPermission = false;
   bool _isFetchingPoliceRoute = false;
   String? _errorMessage;
+  int _activePointers = 0;
+  Position? _pendingPosition;
+
+  bool get _userIsInteracting => _activePointers > 0;
 
   @override
   void initState() {
@@ -1241,11 +1419,28 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
   }
 
   void _moveCameraTo(latlng.LatLng target, {double? zoom}) {
+    if (_userIsInteracting) return;
+    if (!target.latitude.isFinite || !target.longitude.isFinite) {
+      return;
+    }
     try {
-      _mapController.move(target, zoom ?? _mapController.camera.zoom);
+      final currentZoom = _mapController.camera.zoom;
+      final effectiveZoom = zoom ?? currentZoom;
+      if (!effectiveZoom.isFinite) return;
+      _mapController.move(target, effectiveZoom);
     } catch (_) {
       // Map may not be attached yet.
     }
+  }
+
+  void _flushPendingPosition() {
+    final pending = _pendingPosition;
+    if (pending == null || !mounted) return;
+    _pendingPosition = null;
+    _position = pending;
+    setState(() {});
+    _moveCameraTo(latlng.LatLng(pending.latitude, pending.longitude));
+    _fetchNearestPoliceRoute(pending);
   }
 
   Future<void> _initLocationTracking() async {
@@ -1297,7 +1492,10 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
 
     try {
       final cached = await Geolocator.getLastKnownPosition();
-      if (cached != null && mounted) {
+      if (cached != null &&
+          mounted &&
+          cached.latitude.isFinite &&
+          cached.longitude.isFinite) {
         setState(() {
           _position = cached;
           _isLoading = false;
@@ -1317,15 +1515,17 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
       );
 
       if (!mounted) return;
-      setState(() {
-        _position = current;
-        _isLoading = false;
-      });
-      _moveCameraTo(
-        latlng.LatLng(current.latitude, current.longitude),
-        zoom: 16,
-      );
-      await _fetchNearestPoliceRoute(current, forceRefresh: true);
+      if (current.latitude.isFinite && current.longitude.isFinite) {
+        setState(() {
+          _position = current;
+          _isLoading = false;
+        });
+        _moveCameraTo(
+          latlng.LatLng(current.latitude, current.longitude),
+          zoom: 16,
+        );
+        await _fetchNearestPoliceRoute(current, forceRefresh: true);
+      }
 
       await _positionSubscription?.cancel();
       _positionSubscription = Geolocator.getPositionStream(
@@ -1335,7 +1535,15 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
         ),
       ).listen((position) {
         if (!mounted) return;
-        setState(() => _position = position);
+        if (!position.latitude.isFinite || !position.longitude.isFinite) return;
+
+        if (_userIsInteracting) {
+          // Defer update until user lifts all fingers
+          _pendingPosition = position;
+          return;
+        }
+        _position = position;
+        setState(() {});
         _moveCameraTo(latlng.LatLng(position.latitude, position.longitude));
         _fetchNearestPoliceRoute(position);
       });
@@ -1373,6 +1581,10 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
     }
 
     _isFetchingPoliceRoute = true;
+    if (!position.latitude.isFinite || !position.longitude.isFinite) {
+      _isFetchingPoliceRoute = false;
+      return;
+    }
     _lastRouteFetchOrigin =
         latlng.LatLng(position.latitude, position.longitude);
     try {
@@ -1380,16 +1592,7 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
         latitude: position.latitude,
         longitude: position.longitude,
       );
-
-      if (stations.isEmpty) {
-        if (!mounted || _nearestPoliceStation != null) return;
-        setState(() {
-          _routePoints = const [];
-          _routeDistanceKm = null;
-          _routeEtaMinutes = null;
-        });
-        return;
-      }
+      if (stations.isEmpty) return;
 
       final origin = latlng.LatLng(position.latitude, position.longitude);
       _PoliceStation? selectedStation;
@@ -1501,7 +1704,9 @@ class _LiveMapTabState extends State<_LiveMapTab> with WidgetsBindingObserver {
           (item['center'] is Map<String, dynamic>
               ? ((item['center']['lon'] as num?)?.toDouble())
               : null);
-      if (lat == null || lon == null) continue;
+      if (lat == null || lon == null || !lat.isFinite || !lon.isFinite) {
+        continue;
+      }
 
       final tags = item['tags'];
       final name = tags is Map<String, dynamic>
@@ -1655,7 +1860,13 @@ out body;
         final id = element['id'] as num?;
         final lat = element['lat'] as num?;
         final lon = element['lon'] as num?;
-        if (id == null || lat == null || lon == null) continue;
+        if (id == null ||
+            lat == null ||
+            lon == null ||
+            !lat.toDouble().isFinite ||
+            !lon.toDouble().isFinite) {
+          continue;
+        }
         nodes[id.toInt()] = latlng.LatLng(lat.toDouble(), lon.toDouble());
       } else if (element['type'] == 'way') {
         ways.add(element);
@@ -2056,7 +2267,9 @@ out body;
       );
     }
 
-    if (_position == null) {
+    if (_position == null ||
+        !_position!.latitude.isFinite ||
+        !_position!.longitude.isFinite) {
       return ColoredBox(
         color: isDark ? const Color(0xFF101010) : const Color(0xFFF8FAFC),
         child: Center(
@@ -2069,75 +2282,96 @@ out body;
     }
 
     final current = latlng.LatLng(_position!.latitude, _position!.longitude);
-    final destination = _nearestPoliceStation;
+    final destination = _nearestPoliceStation != null &&
+            _nearestPoliceStation!.latitude.isFinite &&
+            _nearestPoliceStation!.longitude.isFinite
+        ? _nearestPoliceStation
+        : null;
     final routePoints = _routePoints.length >= 2
         ? _routePoints
         : (destination != null
             ? [current, destination]
             : const <latlng.LatLng>[]);
 
-    return FlutterMap(
-      mapController: _mapController,
-      options: MapOptions(
-        initialCenter: current,
-        initialZoom: 16,
-        maxZoom: 19,
-        minZoom: 3,
-      ),
-      children: [
-        TileLayer(
-          urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-           userAgentPackageName: 'com.example.aegixa',
-          retinaMode: RetinaMode.isHighDensity(context),
-          maxNativeZoom: 19,
+    return Listener(
+      onPointerDown: (_) => _activePointers++,
+      onPointerUp: (_) {
+        _activePointers = (_activePointers - 1).clamp(0, 99);
+        if (_activePointers == 0) _flushPendingPosition();
+      },
+      onPointerCancel: (_) {
+        _activePointers = (_activePointers - 1).clamp(0, 99);
+        if (_activePointers == 0) _flushPendingPosition();
+      },
+      child: FlutterMap(
+        mapController: _mapController,
+        options: MapOptions(
+          initialCenter: current,
+          initialZoom: 16,
+          maxZoom: 19,
+          minZoom: 3,
         ),
-        if (routePoints.length >= 2)
-          PolylineLayer(
-            polylines: [
-              Polyline(
-                points: routePoints,
-                color: theme.colorScheme.primary.withValues(alpha: 0.9),
-                strokeWidth: 6,
+        children: [
+          TileLayer(
+            urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+            userAgentPackageName: 'com.example.aegixa',
+            retinaMode: RetinaMode.isHighDensity(context),
+            maxNativeZoom: 19,
+          ),
+          if (routePoints.length >= 2 &&
+              routePoints
+                  .every((p) => p.latitude.isFinite && p.longitude.isFinite))
+            PolylineLayer(
+              polylines: [
+                Polyline(
+                  points: routePoints,
+                  color: theme.colorScheme.primary.withValues(alpha: 0.9),
+                  strokeWidth: 6,
+                ),
+              ],
+            ),
+          CircleLayer(
+            circles: [
+              CircleMarker(
+                point: current,
+                radius:
+                    (_position!.accuracy.isFinite ? _position!.accuracy : 20.0)
+                            .clamp(20, 120)
+                            .toDouble() /
+                        2,
+                color: theme.colorScheme.primary.withValues(alpha: 0.16),
+                borderColor: theme.colorScheme.primary.withValues(alpha: 0.55),
+                borderStrokeWidth: 1,
               ),
             ],
           ),
-        CircleLayer(
-          circles: [
-            CircleMarker(
-              point: current,
-              radius: _position!.accuracy.clamp(20, 120).toDouble() / 2,
-              color: theme.colorScheme.primary.withValues(alpha: 0.16),
-              borderColor: theme.colorScheme.primary.withValues(alpha: 0.55),
-              borderStrokeWidth: 1,
-            ),
-          ],
-        ),
-        MarkerLayer(
-          markers: [
-            Marker(
-              point: current,
-              width: 28,
-              height: 28,
-              child: Icon(
-                Icons.my_location,
-                color: theme.colorScheme.primary,
-                size: 24,
-              ),
-            ),
-            if (destination != null)
+          MarkerLayer(
+            markers: [
               Marker(
-                point: destination,
-                width: 36,
-                height: 36,
-                child: const Icon(
-                  Icons.local_police,
-                  color: Color(0xFFFF4D4F),
-                  size: 30,
+                point: current,
+                width: 28,
+                height: 28,
+                child: Icon(
+                  Icons.my_location,
+                  color: theme.colorScheme.primary,
+                  size: 24,
                 ),
               ),
-          ],
-        ),
-      ],
+              if (destination != null)
+                Marker(
+                  point: destination,
+                  width: 36,
+                  height: 36,
+                  child: const Icon(
+                    Icons.local_police,
+                    color: Color(0xFFFF4D4F),
+                    size: 30,
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -2657,23 +2891,40 @@ class _ProfileTabState extends State<_ProfileTab> {
     if (userId == null) {
       return;
     }
-    final remoteProfile =
-        await _usernameService.getPublicProfileForUserId(userId);
+
     final prefs = await SharedPreferences.getInstance();
-    final path = (remoteProfile?.profilePhotoPath ??
-            prefs.getString('profile_photo_$userId') ??
-            '')
-        .trim();
-    if (path.isNotEmpty) {
-      await prefs.setString('profile_photo_$userId', path);
+
+    // Show cached photo immediately while we fetch the remote one.
+    final cachedPath = (prefs.getString('profile_photo_$userId') ?? '').trim();
+    if (cachedPath.isNotEmpty && mounted) {
+      setState(() {
+        _profilePhotoPath = cachedPath;
+      });
+      widget.onProfilePhotoChanged(cachedPath);
     }
-    if (!mounted) {
-      return;
+
+    // Then try remote.
+    try {
+      final remoteProfile =
+          await _usernameService.getPublicProfileForUserId(userId);
+      final remotePath = (remoteProfile?.profilePhotoPath ?? '').trim();
+
+      // Prefer remote URL; fall back to cached local path.
+      final resolvedPath = remotePath.isNotEmpty ? remotePath : cachedPath;
+
+      if (resolvedPath.isNotEmpty) {
+        await prefs.setString('profile_photo_$userId', resolvedPath);
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _profilePhotoPath = resolvedPath.isEmpty ? null : resolvedPath;
+      });
+      widget.onProfilePhotoChanged(resolvedPath.isEmpty ? null : resolvedPath);
+    } catch (_) {
+      // Network error — keep using the cached photo (already set above).
     }
-    setState(() {
-      _profilePhotoPath = path.isEmpty ? null : path;
-    });
-    widget.onProfilePhotoChanged(path.isEmpty ? null : path);
   }
 
   Future<void> _pickProfilePhoto() async {
@@ -2730,25 +2981,48 @@ class _ProfileTabState extends State<_ProfileTab> {
     final savedFile = await File(picked.path).copy(targetPath);
 
     var finalPath = savedFile.path;
-    final uploadedUrl = await _usernameService.uploadProfilePhoto(
-      user: widget.user!,
-      localFilePath: savedFile.path,
-    );
-    if ((uploadedUrl ?? '').trim().isNotEmpty) {
-      finalPath = uploadedUrl!.trim();
+    String? uploadError;
+    try {
+      final uploadedUrl = await _usernameService.uploadProfilePhoto(
+        user: widget.user!,
+        localFilePath: savedFile.path,
+      );
+      if ((uploadedUrl ?? '').trim().isNotEmpty) {
+        finalPath = uploadedUrl!.trim();
+      }
+    } catch (e) {
+      uploadError = e.toString();
     }
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('profile_photo_${widget.user!.uid}', finalPath);
-    if ((_username ?? '').trim().isNotEmpty) {
-      final remotePhotoPath = _isRemotePhoto(finalPath) ? finalPath : '';
-      // Only update the photo field; pass null/empty for phone and DOB so
-      // upsertPublicProfile preserves whatever is already stored in Supabase.
+
+    // If _username hasn't loaded yet (race condition), fetch it now so we
+    // don't silently skip saving the photo URL to Supabase.
+    var username = (_username ?? '').trim();
+    if (username.isEmpty) {
+      try {
+        username =
+            (await _usernameService.getUsernameForUserId(widget.user!.uid) ??
+                    '')
+                .trim();
+        if (username.isNotEmpty) {
+          setState(() {
+            _username = username;
+          });
+        }
+      } catch (_) {}
+    }
+
+    // Only write photo_path to Supabase when we have a remote URL.
+    // Never overwrite an existing remote URL with an empty string on
+    // upload failure.
+    if (username.isNotEmpty && _isRemotePhoto(finalPath)) {
       await _usernameService.upsertPublicProfile(
         user: widget.user!,
-        username: _username!,
+        username: username,
         displayName: widget.user!.displayName,
-        photoPath: remotePhotoPath,
+        photoPath: finalPath,
       );
     }
 
@@ -2757,9 +3031,11 @@ class _ProfileTabState extends State<_ProfileTab> {
     }
     if (!_isRemotePhoto(finalPath)) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
+        SnackBar(
           content: Text(
-            'Photo saved on this device only. Check internet and try again to sync it.',
+            uploadError != null
+                ? 'Photo upload failed: $uploadError'
+                : 'Photo saved on this device only. Check internet and try again to sync it.',
           ),
         ),
       );
@@ -2824,24 +3100,23 @@ class _ProfileTabState extends State<_ProfileTab> {
   ) async {
     final updated = <EmergencyContact>[];
     for (final contact in contacts) {
-      final hasPhoto = (contact.profilePhotoPath ?? '').trim().isNotEmpty;
       final username = (contact.username ?? '').trim();
-      if (hasPhoto || username.isEmpty) {
+      if (username.isEmpty) {
         updated.add(contact);
         continue;
       }
 
       try {
-        final results = await _usernameService.searchUsers(username, limit: 10);
-         AegixaUserSuggestion? matched;
-        for (final item in results) {
-          if (item.username == username) {
-            matched = item;
-            break;
-          }
-        }
-        final remotePhoto = (matched?.profilePhotoPath ?? '').trim();
-        if (remotePhoto.isNotEmpty) {
+        // Use direct profile lookup instead of searchUsers, which can
+        // silently fail to enrich the photo_path field.
+        final profile =
+            await _usernameService.getPublicProfileForUsername(username);
+        final remotePhoto = (profile?.profilePhotoPath ?? '').trim();
+        final currentPhoto = (contact.profilePhotoPath ?? '').trim();
+
+        // Only update if remote has a real photo; never overwrite a valid
+        // photo with an empty string (e.g. when the lookup returns no match).
+        if (remotePhoto.isNotEmpty && remotePhoto != currentPhoto) {
           final merged = contact.copyWith(profilePhotoPath: remotePhoto);
           await _service.saveContact(merged);
           updated.add(merged);
@@ -2860,6 +3135,8 @@ class _ProfileTabState extends State<_ProfileTab> {
       context,
       contact: contact,
       suggestPrimary: _contacts.isEmpty,
+      currentUserUid: widget.user?.uid,
+      existingContacts: _contacts,
       onSave: _service.saveContact,
     );
     if (!mounted || !didSave) {
@@ -3039,15 +3316,6 @@ class _ProfileTabState extends State<_ProfileTab> {
                   color: theme.colorScheme.onSurface,
                 ),
               ),
-              const SizedBox(height: 4),
-              Text(
-                'Edit trusted people with name and phone number for quick SOS access.',
-                style: TextStyle(
-                  color: isDark
-                      ? const Color(0xFFA3A3A3)
-                      : const Color(0xFF6B7280),
-                ),
-              ),
               const SizedBox(height: 14),
               SizedBox(
                 width: double.infinity,
@@ -3105,11 +3373,13 @@ class _SettingsTab extends StatelessWidget {
     required this.user,
     required this.themeModeController,
     required this.onOpenEmergencyContacts,
+    required this.onOpenSosInbox,
     required this.onLogout,
     required this.autoVideoRecord,
     required this.autoVoiceRecord,
     required this.vibrationOnSos,
     required this.holdDuration,
+    required this.onOpenBatteryOptimizationSettings,
     required this.onAutoVideoRecordChanged,
     required this.onAutoVoiceRecordChanged,
     required this.onVibrationOnSosChanged,
@@ -3119,11 +3389,13 @@ class _SettingsTab extends StatelessWidget {
   final User? user;
   final ValueNotifier<ThemeMode> themeModeController;
   final VoidCallback onOpenEmergencyContacts;
+  final VoidCallback onOpenSosInbox;
   final Future<void> Function() onLogout;
   final bool autoVideoRecord;
   final bool autoVoiceRecord;
   final bool vibrationOnSos;
   final int holdDuration;
+  final Future<void> Function() onOpenBatteryOptimizationSettings;
   final ValueChanged<bool> onAutoVideoRecordChanged;
   final ValueChanged<bool> onAutoVoiceRecordChanged;
   final ValueChanged<bool> onVibrationOnSosChanged;
@@ -3311,28 +3583,10 @@ class _SettingsTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
 
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        Text(
-          'Settings',
-          style: TextStyle(
-            fontSize: 30,
-            fontWeight: FontWeight.w800,
-            color: theme.colorScheme.onSurface,
-          ),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          'Manage account, appearance and safety options',
-          style: TextStyle(
-            color: isDark ? const Color(0xFFA3A3A3) : const Color(0xFF6B7280),
-            fontSize: 14,
-          ),
-        ),
-        const SizedBox(height: 18),
         const _SettingsSectionHeader(title: 'Account'),
         _SurfaceCard(
           child: Column(
@@ -3340,21 +3594,21 @@ class _SettingsTab extends StatelessWidget {
               _SettingsTile(
                 assetIconPath: 'assets/add-contact.png',
                 title: 'Profile & contacts',
-                subtitle: 'Manage profile and emergency contacts',
+                subtitle: '',
                 onTap: onOpenEmergencyContacts,
               ),
               const SizedBox(height: 10),
               _SettingsTile(
                 assetIconPath: 'assets/profile.png',
                 title: 'Account details',
-                subtitle: 'View your username, email and phone',
+                subtitle: '',
                 onTap: () => _showAccountDetailsSheet(context),
               ),
               const SizedBox(height: 10),
               _SettingsTile(
                 assetIconPath: 'assets/folder.png',
                 title: 'SOS recordings',
-                subtitle: 'Open saved SOS audio recordings',
+                subtitle: '',
                 onTap: () {
                   Navigator.of(context).push(
                     MaterialPageRoute(
@@ -3362,6 +3616,12 @@ class _SettingsTab extends StatelessWidget {
                     ),
                   );
                 },
+              ),
+              const SizedBox(height: 10),
+              _SettingsTile(
+                title: 'SOS inbox',
+                subtitle: '',
+                onTap: onOpenSosInbox,
               ),
             ],
           ),
@@ -3374,7 +3634,7 @@ class _SettingsTab extends StatelessWidget {
               const _SettingsTile(
                 assetIconPath: 'assets/night-mode.png',
                 title: 'Theme mode',
-                subtitle: 'Choose how Aegixa looks on your device',
+                subtitle: '',
               ),
               const SizedBox(height: 10),
               SizedBox(
@@ -3403,6 +3663,28 @@ class _SettingsTab extends StatelessWidget {
                   },
                 ),
               ),
+              const SizedBox(height: 10),
+              _SettingsTile(
+                assetIconPath: 'assets/night-mode.png',
+                title: 'Battery optimization',
+                subtitle: 'Disable it on Android for faster panic alerts.',
+                onTap: () async {
+                  await onOpenBatteryOptimizationSettings();
+                },
+              ),
+              const SizedBox(height: 10),
+              _SettingsTile(
+                assetIconPath: 'assets/night-mode.png',
+                title: 'OEM background guide',
+                subtitle: 'Brand-specific autostart and battery steps.',
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const BatteryOptimizationGuideScreen(),
+                    ),
+                  );
+                },
+              ),
             ],
           ),
         ),
@@ -3419,8 +3701,6 @@ class _SettingsTab extends StatelessWidget {
                   'Auto video record',
                   style: TextStyle(fontWeight: FontWeight.w700),
                 ),
-                subtitle: const Text(
-                    'Start video recording automatically on SOS (no start button)'),
               ),
               const Divider(height: 1),
               SwitchListTile.adaptive(
@@ -3431,8 +3711,6 @@ class _SettingsTab extends StatelessWidget {
                   'Auto voice record',
                   style: TextStyle(fontWeight: FontWeight.w700),
                 ),
-                subtitle:
-                    const Text('Record emergency audio when SOS triggers'),
               ),
               const Divider(height: 1),
               SwitchListTile.adaptive(
@@ -3443,8 +3721,6 @@ class _SettingsTab extends StatelessWidget {
                   'Vibration on SOS',
                   style: TextStyle(fontWeight: FontWeight.w700),
                 ),
-                subtitle:
-                    const Text('Vibrate device immediately after SOS trigger'),
               ),
               const SizedBox(height: 8),
               Align(
@@ -3479,7 +3755,7 @@ class _SettingsTab extends StatelessWidget {
           child: _SettingsTile(
             assetIconPath: 'assets/logout.png',
             title: 'Logout',
-            subtitle: 'Sign out of your account securely',
+            subtitle: '',
             onTap: () => _handleLogout(context),
             isDestructive: true,
           ),
@@ -3539,9 +3815,8 @@ class _SettingsTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(14),
         onTap: onTap,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Container(
                 width: 40,
@@ -3573,6 +3848,7 @@ class _SettingsTile extends StatelessWidget {
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
                       title,
@@ -3584,15 +3860,17 @@ class _SettingsTile extends StatelessWidget {
                             : theme.colorScheme.onSurface,
                       ),
                     ),
-                    const SizedBox(height: 3),
-                    Text(
-                      subtitle,
-                      style: TextStyle(
-                        color:
-                            theme.colorScheme.onSurface.withValues(alpha: 0.62),
-                        height: 1.35,
+                    if (subtitle.isNotEmpty) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          color: theme.colorScheme.onSurface
+                              .withValues(alpha: 0.62),
+                          height: 1.35,
+                        ),
                       ),
-                    ),
+                    ],
                   ],
                 ),
               ),
