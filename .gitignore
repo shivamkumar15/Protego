@@ -57,6 +57,9 @@ migrate_working_dir/
 .env.*
 secret.dart
 
+# Supabase CLI temp state
+/supabase/.temp/
+
 # Symbolication related
 app.*.symbols
 
